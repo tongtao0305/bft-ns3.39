@@ -34,6 +34,7 @@ public:
 
 	// add a queue pair
 	void AddQueuePair(uint64_t size, uint16_t pg, Ipv4Address _sip, Ipv4Address _dip, uint16_t _sport, uint16_t _dport, uint32_t win, uint64_t baseRtt, Callback<void> notifyAppFinish, Time stopTime);
+	void AddQueuePair(Ptr<Packet> payload, uint16_t pg, Ipv4Address _sip, Ipv4Address _dip, uint16_t _sport, uint16_t _dport, uint32_t win, uint64_t baseRtt, Callback<void> notifyAppFinish, Time stopTime);
 
 	// callback when qp completes
 	void QpComplete(Ptr<RdmaQueuePair> q);

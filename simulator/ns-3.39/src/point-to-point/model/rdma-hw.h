@@ -5,6 +5,7 @@
 #include <ns3/rdma-queue-pair.h>
 #include <ns3/node.h>
 #include <ns3/custom-header.h>
+#include <ns3/callback.h>
 #include "qbb-net-device.h"
 #include <unordered_map>
 #include "pint.h"
@@ -45,6 +46,8 @@ public:
 	// qp complete callback
 	typedef Callback<void, Ptr<RdmaQueuePair> > QpCompleteCallback;
 	QpCompleteCallback m_qpCompleteCallback;
+	typedef Callback<void, uint32_t, uint16_t, uint16_t, uint32_t, Ptr<Packet> > AppReceiveCallback;
+	std::unordered_map<uint16_t, AppReceiveCallback> m_appReceiveCallbacks;
 
 	void SetNode(Ptr<Node> node);
 	void Setup(QpCompleteCallback cb); // setup shared data and callbacks with the QbbNetDevice
@@ -52,7 +55,10 @@ public:
 	Ptr<RdmaQueuePair> GetQp(uint32_t dip, uint16_t sport, uint16_t pg); // get the qp
 	uint32_t GetNicIdxOfQp(Ptr<RdmaQueuePair> qp); // get the NIC index of the qp
 	void AddQueuePair(uint64_t size, uint16_t pg, Ipv4Address _sip, Ipv4Address _dip, uint16_t _sport, uint16_t _dport, uint32_t win, uint64_t baseRtt, Callback<void> notifyAppFinish,Time stopTime); // add a new qp (new send)
+	void AddQueuePair(Ptr<Packet> payload, uint16_t pg, Ipv4Address _sip, Ipv4Address _dip, uint16_t _sport, uint16_t _dport, uint32_t win, uint64_t baseRtt, Callback<void> notifyAppFinish, Time stopTime);
 	void DeleteQueuePair(Ptr<RdmaQueuePair> qp);
+	void RegisterAppReceiveCallback(uint16_t port, AppReceiveCallback callback);
+	void UnregisterAppReceiveCallback(uint16_t port);
 
 	Ptr<RdmaRxQueuePair> GetRxQp(uint32_t sip, uint32_t dip, uint16_t sport, uint16_t dport, uint16_t pg, bool create); // get a rxQp
 	uint32_t GetNicIdxOfRxQp(Ptr<RdmaRxQueuePair> q); // get the NIC index of the rxQp

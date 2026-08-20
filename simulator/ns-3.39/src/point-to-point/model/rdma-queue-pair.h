@@ -31,6 +31,7 @@ public:
 	uint32_t wp; // current window of packets
 	uint32_t lastPktSize;
 	Callback<void> m_notifyAppFinish;
+	Ptr<Packet> m_applicationPayload;
 
 // vamsi
 	std::map<uint32_t,double> rates;

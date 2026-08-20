@@ -224,9 +224,14 @@ Ptr<RdmaQueuePair> RdmaHw::GetQp(uint32_t dip, uint16_t sport, uint16_t pg) {
 	return NULL;
 }
 void RdmaHw::AddQueuePair(uint64_t size, uint16_t pg, Ipv4Address sip, Ipv4Address dip, uint16_t sport, uint16_t dport, uint32_t win, uint64_t baseRtt, Callback<void> notifyAppFinish, Time stopTime) {
+	AddQueuePair(Create<Packet>(size), pg, sip, dip, sport, dport, win, baseRtt, notifyAppFinish, stopTime);
+}
+
+void RdmaHw::AddQueuePair(Ptr<Packet> payload, uint16_t pg, Ipv4Address sip, Ipv4Address dip, uint16_t sport, uint16_t dport, uint32_t win, uint64_t baseRtt, Callback<void> notifyAppFinish, Time stopTime) {
 	// create qp
 	Ptr<RdmaQueuePair> qp = CreateObject<RdmaQueuePair>(pg, sip, dip, sport, dport);
-	qp->SetSize(size);
+	qp->m_applicationPayload = payload ? payload->Copy() : Create<Packet>();
+	qp->SetSize(qp->m_applicationPayload->GetSize());
 	qp->SetWin(win);
 	qp->SetBaseRtt(baseRtt);
 	qp->SetVarWin(m_var_win);
@@ -276,6 +281,14 @@ void RdmaHw::AddQueuePair(uint64_t size, uint16_t pg, Ipv4Address sip, Ipv4Addre
 	m_nic[nic_idx].dev->NewQp(qp);
 }
 
+void RdmaHw::RegisterAppReceiveCallback(uint16_t port, AppReceiveCallback callback) {
+	m_appReceiveCallbacks[port] = callback;
+}
+
+void RdmaHw::UnregisterAppReceiveCallback(uint16_t port) {
+	m_appReceiveCallbacks.erase(port);
+}
+
 void RdmaHw::DeleteQueuePair(Ptr<RdmaQueuePair> qp) {
 	// remove qp from the m_qpMap
 	uint64_t key = GetQpKey(qp->dip.Get(), qp->sport, qp->m_pg);
@@ -318,7 +331,11 @@ void RdmaHw::DeleteRxQp(uint32_t dip, uint16_t pg, uint16_t dport) {
 int RdmaHw::ReceiveUdp(Ptr<Packet> p, CustomHeader &ch) {
 	uint8_t ecnbits = ch.GetIpv4EcnBits();
 
-	uint32_t payload_size = p->GetSize() - ch.GetSerializedSize();
+	uint32_t header_size = ch.GetSerializedSize();
+	if (p->GetSize() < header_size) {
+		return 0;
+	}
+	uint32_t payload_size = p->GetSize() - header_size;
 
 	// TODO find corresponding rx queue pair
 	Ptr<RdmaRxQueuePair> rxQp = GetRxQp(ch.dip, ch.sip, ch.udp.dport, ch.udp.sport, ch.udp.pg, true);
@@ -330,6 +347,11 @@ int RdmaHw::ReceiveUdp(Ptr<Packet> p, CustomHeader &ch) {
 	rxQp->m_milestone_rx = m_ack_interval;
 
 	int x = ReceiverCheckSeq(ch.udp.seq, rxQp, payload_size);
+	auto app = m_appReceiveCallbacks.find(ch.udp.dport);
+	if ((x == 1 || x == 5) && app != m_appReceiveCallbacks.end()) {
+		Ptr<Packet> payload = p->CreateFragment(header_size, payload_size);
+		app->second(ch.sip, ch.udp.sport, ch.udp.pg, ch.udp.seq, payload);
+	}
 	if (x == 1 || x == 2) { //generate ACK or NACK
 		qbbHeader seqh;
 		seqh.SetSeq(rxQp->ReceiverNextExpectedSeq);
@@ -568,8 +590,14 @@ Ptr<Packet> RdmaHw::GetNxtPacket(Ptr<RdmaQueuePair> qp) {
 	uint32_t payload_size = qp->GetBytesLeft();
 	if (m_mtu < payload_size)
 		payload_size = m_mtu;
-	Ptr<Packet> p = Create<Packet> (payload_size);
 	uint32_t sentBytes = qp->m_size - qp->GetBytesLeft();
+	Ptr<Packet> p;
+	if (qp->m_applicationPayload &&
+			sentBytes + payload_size <= qp->m_applicationPayload->GetSize()) {
+		p = qp->m_applicationPayload->CreateFragment(sentBytes, payload_size);
+	} else {
+		p = Create<Packet> (payload_size);
+	}
 	uint32_t nic_idx = GetNicIdxOfQp(qp);
 	DataRate m_bps = m_nic[nic_idx].dev->GetDataRate();
 	double bdp = m_bps.GetBitRate() * 1 * qp->m_baseRtt * 1e-9 / 8;
