@@ -32,6 +32,7 @@
 *.app
 
 ./build/
-./__pycache__/
+results.txt
+__pycache__/
 .lock*
 .waf*
