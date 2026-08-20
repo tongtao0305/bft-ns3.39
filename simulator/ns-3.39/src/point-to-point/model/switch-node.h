@@ -3,6 +3,7 @@
 
 #include <unordered_map>
 #include <ns3/node.h>
+#include <ns3/traced-callback.h>
 #include "qbb-net-device.h"
 #include "switch-mmu.h"
 #include "pint.h"
@@ -31,6 +32,7 @@ protected:
 	bool m_ecnEnabled;
 	uint32_t m_ccMode;
 	uint64_t m_maxRtt;
+	TracedCallback<Ptr<const Packet>, uint32_t, uint32_t> m_ecnMarkTrace;
 
 	uint32_t m_ackHighPrio; // set high priority for ACK/NACK
 

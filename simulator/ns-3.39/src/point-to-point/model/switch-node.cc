@@ -50,6 +50,10 @@ TypeId SwitchNode::GetTypeId (void)
 	                                  BooleanValue(false),
 	                                  MakeBooleanAccessor(&SwitchNode::PowerEnabled),
 	                                  MakeBooleanChecker())
+	                    .AddTraceSource("EcnMark",
+	                                    "Packet marked CE by the switch.",
+	                                    MakeTraceSourceAccessor(&SwitchNode::m_ecnMarkTrace),
+	                                    "ns3::Packet::TracedCallback")
 
 	                    ;
 	return tid;
@@ -255,6 +259,7 @@ void SwitchNode::SwitchNotifyDequeue(uint32_t ifIndex, uint32_t qIndex, Ptr<Pack
 				h.SetEcn((Ipv4Header::EcnType)0x03);
 				p->AddHeader(h);
 				p->AddHeader(ppp);
+				m_ecnMarkTrace(p, ifIndex, qIndex);
 			}
 		}
 		//CheckAndSendPfc(inDev, qIndex);

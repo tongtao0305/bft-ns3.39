@@ -111,6 +111,8 @@ public:
 
 
   DataRate GetDataRate();
+  void SetDynamicThreshold(bool enabled);
+  bool GetDynamicThreshold() const;
 
   /**
    * Get the size of Tx buffer available in the device

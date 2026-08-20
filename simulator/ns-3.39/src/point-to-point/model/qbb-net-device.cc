@@ -274,6 +274,14 @@ DataRate QbbNetDevice::GetDataRate() {
 	return m_bps;
 }
 
+void QbbNetDevice::SetDynamicThreshold(bool enabled) {
+	m_dynamicth = enabled;
+}
+
+bool QbbNetDevice::GetDynamicThreshold() const {
+	return m_dynamicth;
+}
+
 bool
 QbbNetDevice::TransmitStart(Ptr<Packet> p)
 {
