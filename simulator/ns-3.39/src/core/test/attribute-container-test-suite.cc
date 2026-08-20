@@ -196,22 +196,6 @@ AttributeContainerObject::GetIntVec() const
 /**
  * \ingroup attribute-tests
  *
- * This function handles mixed constness and compatible, yet
- * distinct numerical classes (like int and long)
- * \param x The left operand.
- * \param y The right operand.
- * \return true if the pairs have the same numerical values.
- */
-template <class A, class B, class C, class D>
-bool
-operator==(const std::pair<A, B>& x, const std::pair<C, D>& y)
-{
-    return x.first == y.first && x.second == y.second;
-}
-
-/**
- * \ingroup attribute-tests
- *
  * Test AttributeContainer instantiation, initialization, access
  */
 class AttributeContainerTestCase : public TestCase

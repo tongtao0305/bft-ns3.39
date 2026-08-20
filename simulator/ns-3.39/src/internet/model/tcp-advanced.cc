@@ -10,6 +10,8 @@
 #include "tcp-advanced.h"
 #include "ns3/log.h"
 
+#include <vector>
+
 namespace ns3 {
 
 NS_LOG_COMPONENT_DEFINE ("TcpAdvanced");
@@ -138,6 +140,7 @@ double GetUDelta (double a, double b) {
 		return a - b;
 	if (b > a)
 		return b - a;
+	return 0;
 }
 
 void TcpAdvanced::ProcessDcAck(Ptr<Packet> packet, const TcpHeader& tcpHeader, Ptr<TcpSocketState> tcb) {
@@ -205,7 +208,8 @@ void TcpAdvanced::UpdateRatePowertcp(Ptr<Packet> packet, const TcpHeader& tcpHea
 
 			double U = 0;
 			uint64_t dt = 0;
-			bool updated[fb.getMaxHops()] = {false}, updated_any = false;
+			std::vector<bool> updated(fb.getMaxHops(), false);
+			bool updated_any = false;
 
 			NS_ASSERT(fb.getHopCount() <= fb.getMaxHops());
 
@@ -248,8 +252,8 @@ void TcpAdvanced::UpdateRatePowertcp(Ptr<Packet> packet, const TcpHeader& tcpHea
 
 			DataRate new_rate;
 			int32_t new_incStage;
-			DataRate new_rate_per_hop[fb.getMaxHops()];
-			int32_t new_incStage_per_hop[fb.getMaxHops()];
+			std::vector<DataRate> new_rate_per_hop(fb.getMaxHops());
+			std::vector<int32_t> new_incStage_per_hop(fb.getMaxHops());
 
 			if (updated_any) {
 				if (dt > m_baseRtt.GetNanoSeconds())
@@ -395,7 +399,8 @@ void TcpAdvanced::UpdateRateHpcc(Ptr<Packet> packet, const TcpHeader& tcpHeader,
 			// check each hop
 			double U = 0;
 			uint64_t dt = 0;
-			bool updated[fb.getMaxHops()] = {false}, updated_any = false;
+			std::vector<bool> updated(fb.getMaxHops(), false);
+			bool updated_any = false;
 			NS_ASSERT(fb.getHopCount() <= fb.getMaxHops());
 
 			for (uint32_t i = 0; i < fb.getHopCount(); i++) {
@@ -429,8 +434,8 @@ void TcpAdvanced::UpdateRateHpcc(Ptr<Packet> packet, const TcpHeader& tcpHeader,
 
 			DataRate new_rate;
 			int32_t new_incStage;
-			DataRate new_rate_per_hop[fb.getMaxHops()];
-			int32_t new_incStage_per_hop[fb.getMaxHops()];
+			std::vector<DataRate> new_rate_per_hop(fb.getMaxHops());
+			std::vector<int32_t> new_incStage_per_hop(fb.getMaxHops());
 			if (!tcb->m_multipleRate) {
 				if (updated_any) {
 					if (dt > m_baseRtt.GetNanoSeconds())
