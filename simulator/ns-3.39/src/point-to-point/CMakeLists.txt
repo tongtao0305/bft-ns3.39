@@ -58,7 +58,7 @@ build_lib(
     helper/qbb-helper.h
     helper/sim-setting.h
   LIBRARIES_TO_LINK ${libnetwork}
+                    ${libinternet}
                     ${mpi_libraries}
-                    ${internet}
   TEST_SOURCES test/point-to-point-test.cc
 )

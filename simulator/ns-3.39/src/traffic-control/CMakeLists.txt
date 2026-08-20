@@ -41,7 +41,6 @@ build_lib(
     model/gen-queue-disc.h
     model/shared-memory.h
   LIBRARIES_TO_LINK ${libnetwork}
-                    ${libpoint-to-point}
                     ${libcore}
   TEST_SOURCES
     test/adaptive-red-queue-disc-test-suite.cc
