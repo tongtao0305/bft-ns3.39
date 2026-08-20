@@ -1,0 +1,35 @@
+build_lib(
+  LIBNAME consensus
+  SOURCE_FILES
+    helper/consensus-experiment.cc
+    helper/consensus-helper.cc
+    helper/consensus-runner.cc
+    model/bidl-application.cc
+    model/consensus-application.cc
+    model/consensus-engine.cc
+    model/consensus-message.cc
+    model/consensus-transport.cc
+    model/consensus-workload.cc
+    model/pbft-engine.cc
+  HEADER_FILES
+    helper/consensus-experiment.h
+    helper/consensus-helper.h
+    helper/consensus-runner.h
+    model/bidl-application.h
+    model/consensus-application.h
+    model/consensus-engine.h
+    model/consensus-message.h
+    model/consensus-transport.h
+    model/consensus-workload.h
+    model/pbft-engine.h
+  LIBRARIES_TO_LINK
+    ${libcore}
+    ${libnetwork}
+    ${libinternet}
+    ${libapplications}
+    ${libcsma}
+    ${libpoint-to-point}
+    ${libtraffic-control}
+  TEST_SOURCES
+    test/consensus-test-suite.cc
+)
