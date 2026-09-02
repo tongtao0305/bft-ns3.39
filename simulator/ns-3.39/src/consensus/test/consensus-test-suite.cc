@@ -134,6 +134,90 @@ class BidlSequencerDeduplicationTestCase : public TestCase {
     }
 };
 
+class BidlMaliciousFirstArrivalTestCase : public TestCase {
+    public:
+    BidlMaliciousFirstArrivalTestCase()
+        : TestCase("BIDL executor keeps the first digest and reexecutes only after consensus mismatch") {}
+
+    private:
+    void InjectTransaction(Ptr<RecordingConsensusTransport> transport, uint32_t sender, uint64_t digest) {
+        ConsensusMessage message;
+        message.protocol = ConsensusProtocol::GENERIC;
+        message.type = ConsensusMessageType::BIDL_TRANSACTION;
+        message.senderId = sender;
+        message.receiverId = 100;
+        message.instanceId = 1;
+        message.payloadSize = 1024;
+        message.digest = digest;
+        message.clientId = 1000;
+        message.requestId = 1;
+        message.transactionCount = 1;
+        transport->Inject(sender, message.ToPacket());
+    }
+
+    void InjectCertificate(Ptr<RecordingConsensusTransport> transport, ConsensusMessageType type, uint32_t sender,
+                           uint64_t digest) {
+        ConsensusMessage message;
+        message.protocol = ConsensusProtocol::GENERIC;
+        message.type = type;
+        message.senderId = sender;
+        message.receiverId = 100;
+        message.instanceId = 1;
+        message.digest = digest;
+        message.transactionCount = 1;
+        transport->Inject(sender, message.ToPacket());
+    }
+
+    void OnConflict(uint32_t, uint64_t, uint32_t) { ++m_conflicts; }
+    void OnReexecution(uint32_t, uint64_t, uint32_t, Time) { ++m_reexecutions; }
+
+    void DoRun() override {
+        constexpr uint64_t legitimateDigest = 0x12345678ULL;
+        constexpr uint64_t forgedDigest = 0x87654321ULL;
+        const uint64_t canonicalBlockDigest = legitimateDigest + 0x9e3779b97f4a7c15ULL;
+
+        Ptr<Node> node = CreateObject<Node>();
+        Ptr<RecordingConsensusTransport> transport = CreateObject<RecordingConsensusTransport>();
+        Ptr<BidlApplication> executor = CreateObject<BidlApplication>();
+        executor->SetNodeId(100);
+        executor->SetRole(BIDL_EXECUTOR);
+        executor->SetOrdererIds({0, 1, 2, 3});
+        executor->SetExecutorIds({100, 101, 102, 103});
+        executor->SetSequencerIds({200});
+        executor->SetBroadcasterIds({300});
+        executor->SetTransport(transport);
+        executor->TraceConnectWithoutContext("ConflictRejected", MakeCallback(&BidlMaliciousFirstArrivalTestCase::OnConflict, this));
+        executor->TraceConnectWithoutContext("BlockReexecution",
+                                             MakeCallback(&BidlMaliciousFirstArrivalTestCase::OnReexecution, this));
+        node->AddApplication(executor);
+        executor->SetStartTime(Seconds(0));
+        executor->SetStopTime(MilliSeconds(10));
+
+        Simulator::Schedule(MilliSeconds(1), &BidlMaliciousFirstArrivalTestCase::InjectTransaction, this, transport, 300,
+                            forgedDigest);
+        Simulator::Schedule(MilliSeconds(2), &BidlMaliciousFirstArrivalTestCase::InjectTransaction, this, transport, 200,
+                            legitimateDigest);
+        for (uint32_t sender = 0; sender < 3; ++sender) {
+            Simulator::Schedule(MilliSeconds(3), &BidlMaliciousFirstArrivalTestCase::InjectCertificate, this, transport,
+                                ConsensusMessageType::BIDL_ORDERED_BLOCK, sender, canonicalBlockDigest);
+        }
+        Simulator::Schedule(MicroSeconds(3005), &BidlMaliciousFirstArrivalTestCase::InjectCertificate, this, transport,
+                            ConsensusMessageType::BIDL_PERSIST, 101, canonicalBlockDigest);
+        Simulator::Schedule(MicroSeconds(3005), &BidlMaliciousFirstArrivalTestCase::InjectCertificate, this, transport,
+                            ConsensusMessageType::BIDL_PERSIST, 102, canonicalBlockDigest);
+        Simulator::Stop(MilliSeconds(10));
+        Simulator::Run();
+
+        NS_TEST_ASSERT_MSG_EQ(m_conflicts, 1, "The second different digest was not rejected");
+        NS_TEST_ASSERT_MSG_EQ(m_reexecutions, 1, "Consensus mismatch did not trigger exactly one block reexecution");
+        NS_TEST_ASSERT_MSG_EQ(executor->GetCommittedBlocks(), 1, "Buffered persist messages did not commit after reexecution");
+        Simulator::Destroy();
+    }
+
+    uint32_t m_conflicts{0};
+    uint32_t m_reexecutions{0};
+};
+
 class ConsensusMeasurementWindowTestCase : public TestCase {
     public:
     ConsensusMeasurementWindowTestCase() : TestCase("Consensus throughput excludes requests completed after the measurement window") {}
@@ -695,6 +779,7 @@ class ConsensusLegacyReplayTestCase : public TestCase {
             bidlPlacementTopology.endpointPhysicalIds.push_back(physicalId);
             bidlPlacementTopology.physicalToEndpoint[physicalId] = physicalId - 1;
         }
+        config.bidlIngressMode = "network";
         ConsensusRolePlacement bidlPlacement = config.ResolveBidlPlacement(bidlPlacementTopology);
         NS_TEST_ASSERT_MSG_EQ(bidlPlacement.clientPhysicalId, 2, "app_id=1 source was not mapped to the BIDL client");
         NS_TEST_ASSERT_MSG_EQ(bidlPlacement.ingressPhysicalId, 1, "app_id=1 destination was not mapped to the sequencer");
@@ -754,6 +839,7 @@ class ConsensusTestSuite : public TestSuite {
         AddTestCase(new RdmaConsensusTransportTestCase(), TestCase::QUICK);
         AddTestCase(new ClientExternalSubmissionTestCase(), TestCase::QUICK);
         AddTestCase(new BidlSequencerDeduplicationTestCase(), TestCase::QUICK);
+        AddTestCase(new BidlMaliciousFirstArrivalTestCase(), TestCase::QUICK);
         AddTestCase(new ConsensusMeasurementWindowTestCase(), TestCase::QUICK);
         AddTestCase(new ConsensusResourceTestCase(), TestCase::QUICK);
         AddTestCase(new PbftNormalPathTestCase(), TestCase::QUICK);

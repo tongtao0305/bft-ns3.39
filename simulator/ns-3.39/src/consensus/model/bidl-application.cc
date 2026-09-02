@@ -1,6 +1,8 @@
 #include "bidl-application.h"
 
 #include "ns3/abort.h"
+#include "ns3/boolean.h"
+#include "ns3/double.h"
 #include "ns3/enum.h"
 #include "ns3/log.h"
 #include "ns3/pointer.h"
@@ -23,17 +25,41 @@ namespace ns3 {
                 .AddAttribute("NodeId", "Logical BIDL node identifier.", UintegerValue(0), MakeUintegerAccessor(&BidlApplication::m_nodeId),
                               MakeUintegerChecker<uint32_t>())
                 .AddAttribute("Role", "BIDL functional role.", EnumValue(BIDL_SEQUENCER), MakeEnumAccessor(&BidlApplication::m_role),
-                              MakeEnumChecker(BIDL_SEQUENCER, "Sequencer", BIDL_ORDERER, "Orderer", BIDL_EXECUTOR, "Executor"))
+                              MakeEnumChecker(BIDL_SEQUENCER, "Sequencer", BIDL_ORDERER, "Orderer", BIDL_EXECUTOR, "Executor",
+                                              BIDL_MALICIOUS, "Malicious"))
                 .AddAttribute("FaultTolerance", "Fault threshold used for ordered and persist certificates.", UintegerValue(1),
                               MakeUintegerAccessor(&BidlApplication::m_faultTolerance), MakeUintegerChecker<uint32_t>())
                 .AddAttribute("BatchSize", "Number of client transactions in one BIDL block.", UintegerValue(1),
                               MakeUintegerAccessor(&BidlApplication::m_batchSize), MakeUintegerChecker<uint32_t>(1))
                 .AddAttribute("BatchTimeout", "Maximum wait before proposing a partial block.", TimeValue(MilliSeconds(1)),
                               MakeTimeAccessor(&BidlApplication::m_batchTimeout), MakeTimeChecker())
+                .AddAttribute("SequencerServiceTime", "Queued ingress, parsing, sequencing, and fanout preparation time per transaction.",
+                              TimeValue(MicroSeconds(20)), MakeTimeAccessor(&BidlApplication::m_sequencerServiceTime), MakeTimeChecker())
+                .AddAttribute("TransactionVerificationTime", "Queued decode, hash, replay, and signature verification time per transaction.",
+                              TimeValue(MicroSeconds(10)), MakeTimeAccessor(&BidlApplication::m_transactionVerificationTime),
+                              MakeTimeChecker())
                 .AddAttribute("ExecutionTimePerTransaction", "Queued CPU service time for one speculative transaction.",
-                              TimeValue(MicroSeconds(250)), MakeTimeAccessor(&BidlApplication::m_executionTimePerTransaction), MakeTimeChecker())
+                              TimeValue(MicroSeconds(15)), MakeTimeAccessor(&BidlApplication::m_executionTimePerTransaction), MakeTimeChecker())
+                .AddAttribute("ApprovalTimePerBlock", "Queued result hashing, signing, verification, and approval time for one block.",
+                              TimeValue(MicroSeconds(100)), MakeTimeAccessor(&BidlApplication::m_approvalTimePerBlock), MakeTimeChecker())
                 .AddAttribute("StorageTime", "Queued storage service time for one ordered block.", TimeValue(MicroSeconds(500)),
                               MakeTimeAccessor(&BidlApplication::m_storageTime), MakeTimeChecker())
+                .AddAttribute("ConsensusSoftwareTime",
+                              "Per-block software overhead after the network PBFT decision (crypto, scheduling, and framework work).",
+                              TimeValue(MicroSeconds(10000)), MakeTimeAccessor(&BidlApplication::m_consensusSoftwareTime),
+                              MakeTimeChecker())
+                .AddAttribute("CommitProcessingTime", "Queued local processing time after the persist quorum for one block.",
+                              TimeValue(MicroSeconds(2500)), MakeTimeAccessor(&BidlApplication::m_commitProcessingTime), MakeTimeChecker())
+                .AddAttribute("AttackProbability", "Probability that an observed sequenced transaction is forged.", DoubleValue(1.0),
+                              MakeDoubleAccessor(&BidlApplication::m_attackProbability), MakeDoubleChecker<double>(0.0, 1.0))
+                .AddAttribute("AttackStart", "Simulation time at which malicious forging starts.", TimeValue(Seconds(0)),
+                              MakeTimeAccessor(&BidlApplication::m_attackStart), MakeTimeChecker())
+                .AddAttribute("AttackStop", "Simulation time at which forging stops; zero means no stop.", TimeValue(Seconds(0)),
+                              MakeTimeAccessor(&BidlApplication::m_attackStop), MakeTimeChecker())
+                .AddAttribute("AttackProcessingTime", "CPU time used to create one forged transaction.", TimeValue(MicroSeconds(20)),
+                              MakeTimeAccessor(&BidlApplication::m_attackProcessingTime), MakeTimeChecker())
+                .AddAttribute("AttackTargetExecutors", "Number of executors receiving each forgery; zero means all.", UintegerValue(1),
+                              MakeUintegerAccessor(&BidlApplication::m_attackTargetExecutors), MakeUintegerChecker<uint32_t>())
                 .AddAttribute("Engine", "BFT ordering engine used on orderer nodes.", PointerValue(),
                               MakePointerAccessor(&BidlApplication::m_engine), MakePointerChecker<ConsensusEngine>())
                 .AddAttribute("Transport", "BIDL complete-message transport.", PointerValue(),
@@ -50,16 +76,30 @@ namespace ns3 {
                 .AddTraceSource("MessageRx", "A complete BIDL message is received.",
                                 MakeTraceSourceAccessor(&BidlApplication::m_messageRxTrace), "ns3::BidlApplication::MessageTracedCallback")
                 .AddTraceSource("PhaseChanged", "A BIDL block reaches a workflow phase.",
-                                MakeTraceSourceAccessor(&BidlApplication::m_phaseChangedTrace), "ns3::BidlApplication::PhaseTracedCallback");
+                                MakeTraceSourceAccessor(&BidlApplication::m_phaseChangedTrace), "ns3::BidlApplication::PhaseTracedCallback")
+                .AddTraceSource("ForgedTransaction", "A malicious node emits forged copies of an observed transaction.",
+                                MakeTraceSourceAccessor(&BidlApplication::m_forgedTransactionTrace),
+                                "ns3::BidlApplication::ForgedTracedCallback")
+                .AddTraceSource("ConflictRejected", "An executor rejects a later transaction with a conflicting digest.",
+                                MakeTraceSourceAccessor(&BidlApplication::m_conflictRejectedTrace),
+                                "ns3::BidlApplication::ConflictTracedCallback")
+                .AddTraceSource("BlockReexecution", "An executor completes whole-block reexecution after a consensus mismatch.",
+                                MakeTraceSourceAccessor(&BidlApplication::m_blockReexecutionTrace),
+                                "ns3::BidlApplication::ReexecutionTracedCallback");
         return tid;
     }
 
     BidlApplication::BidlApplication()
         : m_nodeId(0), m_role(BIDL_SEQUENCER), m_faultTolerance(1), m_batchSize(1), m_batchTimeout(MilliSeconds(1)),
-          m_executionTimePerTransaction(MicroSeconds(250)), m_storageTime(MicroSeconds(500)), m_nextTransactionSequence(1),
+          m_sequencerServiceTime(MicroSeconds(20)), m_transactionVerificationTime(MicroSeconds(10)),
+          m_executionTimePerTransaction(MicroSeconds(15)), m_approvalTimePerBlock(MicroSeconds(100)),
+          m_storageTime(MicroSeconds(500)), m_consensusSoftwareTime(MicroSeconds(10000)),
+          m_commitProcessingTime(MicroSeconds(2500)), m_attackProbability(1.0), m_attackStart(Seconds(0)),
+          m_attackStop(Seconds(0)), m_attackProcessingTime(MicroSeconds(20)), m_attackTargetExecutors(1),
+          m_nextTransactionSequence(1),
           m_nextBlockSequence(1), m_nextExecutionSequence(1), m_nextMessageId(1), m_executionBusy(false), m_committedBlocks(0),
           m_committedTransactions(0), m_firstCommitWindowStart(Seconds(0)), m_lastCommit(Seconds(0)), m_hasCommitWindow(false),
-          m_running(false) {}
+          m_running(false), m_attackRandom(CreateObject<UniformRandomVariable>()) {}
 
     void BidlApplication::SetNodeId(uint32_t nodeId) {
         m_nodeId = nodeId;
@@ -79,6 +119,10 @@ namespace ns3 {
 
     void BidlApplication::SetSequencerIds(const std::vector<uint32_t>& ids) {
         m_sequencerIds = ids;
+    }
+
+    void BidlApplication::SetBroadcasterIds(const std::vector<uint32_t>& ids) {
+        m_broadcasterIds = ids;
     }
 
     void BidlApplication::SetEngine(Ptr<ConsensusEngine> engine) {
@@ -152,6 +196,46 @@ namespace ns3 {
         }
     }
 
+    void BidlApplication::InjectTransaction(uint32_t payloadSize, uint32_t transactionCount, uint64_t requestId) {
+        if (!m_running || m_role != BIDL_SEQUENCER || payloadSize == 0 || transactionCount == 0 || requestId == 0) {
+            return;
+        }
+        ClientRequest request;
+        request.clientId = m_nodeId; // A direct ingress has no network client endpoint.
+        request.requestId = requestId;
+        request.payloadSize = payloadSize;
+        request.transactionCount = transactionCount;
+        request.digest = requestId ^ (static_cast<uint64_t>(payloadSize) << 32) ^ transactionCount ^ 0x9e3779b97f4a7c15ULL;
+        if (request.digest == 0 || request.digest == INVALID_TRANSACTION_DIGEST) {
+            ++request.digest;
+        }
+        EnqueueTransaction(request);
+    }
+
+    void BidlApplication::EnqueueTransaction(const ClientRequest& transaction) {
+        if (!m_running || m_role != BIDL_SEQUENCER) {
+            return;
+        }
+        const auto key = std::make_pair(transaction.clientId, transaction.requestId);
+        m_ingressArrivalTimes.emplace(key, Simulator::Now());
+        m_resourceModel->SubmitCpuTask(
+            m_sequencerServiceTime,
+            MakeCallback(&BidlApplication::CompleteSequencerService, this)
+                .Bind(transaction.clientId, transaction.requestId, transaction.payloadSize, transaction.transactionCount,
+                      transaction.digest));
+    }
+
+    void BidlApplication::CompleteSequencerService(uint32_t clientId, uint64_t requestId, uint32_t payloadSize,
+                                                   uint32_t transactionCount, uint64_t digest) {
+        ClientRequest transaction;
+        transaction.clientId = clientId;
+        transaction.requestId = requestId;
+        transaction.payloadSize = payloadSize;
+        transaction.transactionCount = transactionCount;
+        transaction.digest = digest;
+        SequenceTransaction(transaction);
+    }
+
     void BidlApplication::SequenceTransaction(const ClientRequest& transaction) {
         if (!m_running || m_role != BIDL_SEQUENCER) {
             return;
@@ -176,9 +260,15 @@ namespace ns3 {
         uint64_t sequence = m_nextTransactionSequence++;
         m_transactions[sequence] = transaction;
         m_clientRequestSequences[requestKey] = sequence;
-        m_transactionArrivalTimes[sequence] = Simulator::Now();
+        Time ingress = Simulator::Now();
+        auto ingressIterator = m_ingressArrivalTimes.find(requestKey);
+        if (ingressIterator != m_ingressArrivalTimes.end()) {
+            ingress = ingressIterator->second;
+            m_ingressArrivalTimes.erase(ingressIterator);
+        }
+        m_transactionArrivalTimes[sequence] = ingress;
         if (!m_hasCommitWindow) {
-            m_firstCommitWindowStart = Simulator::Now();
+            m_firstCommitWindowStart = ingress;
             m_hasCommitWindow = true;
         }
 
@@ -191,8 +281,10 @@ namespace ns3 {
         message.clientId = transaction.clientId;
         message.requestId = transaction.requestId;
         message.transactionCount = transaction.transactionCount;
+        message.view = ingress.GetNanoSeconds(); // Carries the internal-latency origin on generic BIDL traffic.
         Broadcast(m_ordererIds, message);
         Broadcast(m_executorIds, message);
+        Broadcast(m_broadcasterIds, message);
     }
 
     void BidlApplication::ReplyToClient(uint64_t sequence, uint64_t blockId) {
@@ -242,8 +334,70 @@ namespace ns3 {
         } else {
             m_digestSequences[message.digest] = message.instanceId;
         }
-        m_transactionArrivalTimes[message.instanceId] = Simulator::Now();
+        m_transactionArrivalTimes[message.instanceId] = message.view == 0 ? Simulator::Now() : NanoSeconds(message.view);
         return true;
+    }
+
+    void BidlApplication::VerifyTransaction(ConsensusMessage message) {
+        auto stored = m_transactions.find(message.instanceId);
+        if (stored != m_transactions.end()) {
+            if (stored->second.digest != message.digest) {
+                TraceRejectedConflict(message);
+            }
+            return;
+        }
+        auto pending = m_verificationDigests.find(message.instanceId);
+        if (pending != m_verificationDigests.end()) {
+            if (pending->second != message.digest) {
+                TraceRejectedConflict(message);
+            }
+            return;
+        }
+        m_verificationPending.insert(message.instanceId);
+        m_verificationDigests[message.instanceId] = message.digest;
+        m_transactionReceiveTimes.emplace(message.instanceId, Simulator::Now());
+        m_resourceModel->SubmitCpuTask(m_transactionVerificationTime,
+                                       MakeCallback(&BidlApplication::CompleteTransactionVerification, this).Bind(message));
+    }
+
+    void BidlApplication::CompleteTransactionVerification(ConsensusMessage message) {
+        m_verificationPending.erase(message.instanceId);
+        m_verificationDigests.erase(message.instanceId);
+        if (!StoreTransaction(message)) {
+            return;
+        }
+        if (m_role == BIDL_ORDERER) {
+            TryProposeBlocks(false);
+            TryProcessPendingProposals();
+        } else if (m_role == BIDL_EXECUTOR) {
+            TryExecuteNextTransaction();
+            TryProcessPendingExecutorMessages();
+        }
+    }
+
+    void BidlApplication::TryProcessPendingExecutorMessages() {
+        std::vector<ConsensusMessage> ready;
+        for (auto iterator = m_pendingExecutorMessages.begin(); iterator != m_pendingExecutorMessages.end();) {
+            const ConsensusMessage& message = iterator->second;
+            uint64_t digest = ComputeBlockDigest(message.instanceId, message.transactionCount);
+            if (digest == 0) {
+                ++iterator;
+            } else if (digest == message.digest || message.type == ConsensusMessageType::BIDL_ORDERED_BLOCK) {
+                ready.push_back(message);
+                iterator = m_pendingExecutorMessages.erase(iterator);
+            } else {
+                auto block = m_blocks.find(message.instanceId);
+                if (block != m_blocks.end() && block->second.reexecutionComplete && block->second.digest == message.digest) {
+                    ready.push_back(message);
+                    iterator = m_pendingExecutorMessages.erase(iterator);
+                } else {
+                    ++iterator;
+                }
+            }
+        }
+        for (const ConsensusMessage& message : ready) {
+            HandleExecutorMessage(message);
+        }
     }
 
     uint64_t BidlApplication::ComputeBlockDigest(uint64_t firstSequence, uint32_t count) const {
@@ -305,6 +459,7 @@ namespace ns3 {
         blockHashes.digest = digest;
         m_engine->Submit(blockHashes);
         if (m_engine->GetLeaderId() == m_nodeId && m_tracedBlocks.insert(firstSequence).second) {
+            m_consensusStartTimes[firstSequence] = Simulator::Now();
             m_batchCreatedTrace(m_nodeId, firstSequence, count);
             m_phaseChangedTrace(m_nodeId, firstSequence, BIDL_BLOCK_PROPOSED, Seconds(0));
         }
@@ -339,8 +494,10 @@ namespace ns3 {
             HandleSequencerMessage(message);
         } else if (m_role == BIDL_ORDERER) {
             HandleOrdererMessage(message);
-        } else {
+        } else if (m_role == BIDL_EXECUTOR) {
             HandleExecutorMessage(message);
+        } else {
+            HandleMaliciousMessage(message);
         }
     }
 
@@ -352,10 +509,32 @@ namespace ns3 {
         if (!ValidateBlock(decision.requestId, decision.transactionCount, decision.digest)) {
             return;
         }
+        m_pendingConsensusDecisions[decision.requestId] = decision;
+        m_resourceModel->SubmitCpuTask(
+            m_consensusSoftwareTime,
+            MakeCallback(&BidlApplication::CompleteEngineDecision, this).Bind(decision.requestId));
+    }
+
+    void BidlApplication::CompleteEngineDecision(uint64_t requestId) {
+        auto pending = m_pendingConsensusDecisions.find(requestId);
+        if (pending == m_pendingConsensusDecisions.end()) {
+            return;
+        }
+        ConsensusDecision decision = pending->second;
+        m_pendingConsensusDecisions.erase(pending);
+        if (!m_running || !ValidateBlock(decision.requestId, decision.transactionCount, decision.digest)) {
+            return;
+        }
 
         if (m_engine->GetLeaderId() == m_nodeId && m_tracedBlocks.insert(decision.requestId).second) {
             m_batchCreatedTrace(m_nodeId, decision.requestId, decision.transactionCount);
             m_phaseChangedTrace(m_nodeId, decision.requestId, BIDL_BLOCK_PROPOSED, Seconds(0));
+        }
+        if (m_engine->GetLeaderId() == m_nodeId) {
+            auto started = m_consensusStartTimes.find(decision.requestId);
+            if (started != m_consensusStartTimes.end()) {
+                m_phaseChangedTrace(m_nodeId, decision.requestId, BIDL_P1_CONSENSUS, Simulator::Now() - started->second);
+            }
         }
 
         ConsensusMessage ordered;
@@ -377,7 +556,7 @@ namespace ns3 {
             request.payloadSize = message.payloadSize;
             request.transactionCount = message.transactionCount;
             request.digest = message.digest;
-            SequenceTransaction(request);
+            EnqueueTransaction(request);
             return;
         }
 
@@ -394,9 +573,8 @@ namespace ns3 {
 
     void BidlApplication::HandleOrdererMessage(const ConsensusMessage& message) {
         if (message.type == ConsensusMessageType::BIDL_TRANSACTION) {
-            if (std::find(m_sequencerIds.begin(), m_sequencerIds.end(), message.senderId) != m_sequencerIds.end() && StoreTransaction(message)) {
-                TryProposeBlocks(false);
-                TryProcessPendingProposals();
+            if (std::find(m_sequencerIds.begin(), m_sequencerIds.end(), message.senderId) != m_sequencerIds.end()) {
+                VerifyTransaction(message);
             }
             return;
         }
@@ -416,15 +594,31 @@ namespace ns3 {
 
     void BidlApplication::HandleExecutorMessage(const ConsensusMessage& message) {
         if (message.type == ConsensusMessageType::BIDL_TRANSACTION) {
-            if (std::find(m_sequencerIds.begin(), m_sequencerIds.end(), message.senderId) != m_sequencerIds.end() && StoreTransaction(message)) {
-                TryExecuteNextTransaction();
+            bool fromSequencer = std::find(m_sequencerIds.begin(), m_sequencerIds.end(), message.senderId) != m_sequencerIds.end();
+            bool fromBroadcaster =
+                std::find(m_broadcasterIds.begin(), m_broadcasterIds.end(), message.senderId) != m_broadcasterIds.end();
+            if (fromSequencer || fromBroadcaster) {
+                VerifyTransaction(message);
             }
             return;
         }
 
-        if ((message.type != ConsensusMessageType::BIDL_ORDERED_BLOCK && message.type != ConsensusMessageType::BIDL_PERSIST) ||
-            !ValidateBlock(message.instanceId, message.transactionCount, message.digest)) {
+        if (message.type != ConsensusMessageType::BIDL_ORDERED_BLOCK && message.type != ConsensusMessageType::BIDL_PERSIST) {
             return;
+        }
+        uint64_t localDigest = ComputeBlockDigest(message.instanceId, message.transactionCount);
+        if (localDigest == 0) {
+            m_pendingExecutorMessages.emplace(message.instanceId, message);
+            return;
+        }
+        bool digestMatches = localDigest == message.digest;
+        if (message.type == ConsensusMessageType::BIDL_PERSIST) {
+            auto known = m_blocks.find(message.instanceId);
+            if (!digestMatches &&
+                (known == m_blocks.end() || !known->second.reexecutionComplete || known->second.digest != message.digest)) {
+                m_pendingExecutorMessages.emplace(message.instanceId, message);
+                return;
+            }
         }
 
         BidlBlockState& block = m_blocks[message.instanceId];
@@ -432,8 +626,12 @@ namespace ns3 {
             block.blockId = message.instanceId;
             block.digest = message.digest;
             block.transactionCount = message.transactionCount;
+            block.requiresReexecution = !digestMatches;
             auto firstSeen = m_transactionArrivalTimes.find(block.blockId);
             block.firstSeen = firstSeen == m_transactionArrivalTimes.end() ? Simulator::Now() : firstSeen->second;
+            auto executionStarted = m_transactionReceiveTimes.find(block.blockId);
+            block.executionStartedAt =
+                executionStarted == m_transactionReceiveTimes.end() ? block.firstSeen : executionStarted->second;
             if (!m_hasCommitWindow) {
                 m_firstCommitWindowStart = block.firstSeen;
                 m_hasCommitWindow = true;
@@ -441,6 +639,10 @@ namespace ns3 {
         }
         if (block.digest != message.digest || block.transactionCount != message.transactionCount) {
             return;
+        }
+
+        if (message.type == ConsensusMessageType::BIDL_ORDERED_BLOCK && !digestMatches) {
+            block.requiresReexecution = true;
         }
 
         if (message.type == ConsensusMessageType::BIDL_ORDERED_BLOCK) {
@@ -454,6 +656,49 @@ namespace ns3 {
         } else {
             block.persistSenders.insert(message.senderId);
             TryCommit(block);
+        }
+    }
+
+    void BidlApplication::HandleMaliciousMessage(const ConsensusMessage& message) {
+        if (message.type != ConsensusMessageType::BIDL_TRANSACTION ||
+            std::find(m_sequencerIds.begin(), m_sequencerIds.end(), message.senderId) == m_sequencerIds.end()) {
+            return;
+        }
+        Time now = Simulator::Now();
+        if (now < m_attackStart || (!m_attackStop.IsZero() && now >= m_attackStop) ||
+            m_attackRandom->GetValue() > m_attackProbability) {
+            return;
+        }
+        m_resourceModel->SubmitCpuTask(m_attackProcessingTime,
+                                       MakeCallback(&BidlApplication::ForgeTransaction, this).Bind(message));
+    }
+
+    void BidlApplication::ForgeTransaction(ConsensusMessage message) {
+        if (!m_running) {
+            return;
+        }
+        message.digest ^= 0xd6e8feb86659fd93ULL;
+        if (message.digest == 0 || message.digest == INVALID_TRANSACTION_DIGEST) {
+            message.digest ^= 0x94d049bb133111ebULL;
+        }
+        uint32_t targets = m_attackTargetExecutors == 0
+                               ? static_cast<uint32_t>(m_executorIds.size())
+                               : std::min<uint32_t>(m_attackTargetExecutors, m_executorIds.size());
+        uint64_t bytes = 0;
+        for (uint32_t index = 0; index < targets; ++index) {
+            ConsensusMessage forged = message;
+            forged.senderId = 0;
+            forged.receiverId = 0;
+            forged.messageId = 0;
+            bytes += forged.ToPacket()->GetSize();
+            Send(m_executorIds[index], forged);
+        }
+        m_forgedTransactionTrace(m_nodeId, message.instanceId, targets, bytes);
+    }
+
+    void BidlApplication::TraceRejectedConflict(const ConsensusMessage& message) {
+        if (m_role == BIDL_EXECUTOR) {
+            m_conflictRejectedTrace(m_nodeId, message.instanceId, message.senderId);
         }
     }
 
@@ -476,6 +721,7 @@ namespace ns3 {
             return;
         }
         m_executedTransactions.insert(sequence);
+        m_transactionExecutionTimes[sequence] = Simulator::Now();
         ++m_nextExecutionSequence;
         m_executionBusy = false;
 
@@ -496,6 +742,9 @@ namespace ns3 {
     }
 
     bool BidlApplication::BlockContainsInvalidTransaction(const BidlBlockState& block) const {
+        if (block.requiresReexecution) {
+            return true;
+        }
         for (uint64_t sequence = block.blockId; sequence < block.blockId + block.transactionCount; ++sequence) {
             if (m_invalidTransactions.count(sequence) != 0) {
                 return true;
@@ -510,6 +759,19 @@ namespace ns3 {
             return;
         }
         block->second.reexecutionComplete = true;
+        m_blockReexecutionTrace(m_nodeId, blockId, block->second.transactionCount,
+                                Simulator::Now() - block->second.reexecutionStartedAt);
+        TryPersist(block->second);
+        TryProcessPendingExecutorMessages();
+    }
+
+    void BidlApplication::CompleteApproval(uint64_t blockId) {
+        auto block = m_blocks.find(blockId);
+        if (block == m_blocks.end()) {
+            return;
+        }
+        block->second.approvalComplete = true;
+        m_phaseChangedTrace(m_nodeId, blockId, BIDL_APPROVAL_COMPLETE, Simulator::Now() - block->second.firstSeen);
         TryPersist(block->second);
     }
 
@@ -519,13 +781,29 @@ namespace ns3 {
         }
         if (!block.executionComplete) {
             block.executionComplete = true;
-            m_phaseChangedTrace(m_nodeId, block.blockId, BIDL_EXECUTION_COMPLETE, Simulator::Now() - block.firstSeen);
+            block.executionCompletedAt = block.executionStartedAt;
+            for (uint64_t sequence = block.blockId; sequence < block.blockId + block.transactionCount; ++sequence) {
+                block.executionCompletedAt = std::max(block.executionCompletedAt, m_transactionExecutionTimes.at(sequence));
+            }
+            Time executionLatency = block.executionCompletedAt - block.executionStartedAt;
+            m_phaseChangedTrace(m_nodeId, block.blockId, BIDL_EXECUTION_COMPLETE, executionLatency);
+            m_phaseChangedTrace(m_nodeId, block.blockId, BIDL_P2_VERIFY_EXECUTE, executionLatency);
         }
         if (BlockContainsInvalidTransaction(block) && !block.reexecutionComplete) {
             if (!block.reexecutionScheduled) {
                 block.reexecutionScheduled = true;
+                block.reexecutionStartedAt = Simulator::Now();
                 Time service = m_executionTimePerTransaction * block.transactionCount;
                 m_resourceModel->SubmitCpuTask(service, MakeCallback(&BidlApplication::CompleteBlockReexecution, this).Bind(block.blockId));
+            }
+            return;
+        }
+        if (!block.approvalComplete) {
+            if (!block.approvalScheduled) {
+                block.approvalScheduled = true;
+                block.persistenceStartedAt = Simulator::Now();
+                m_resourceModel->SubmitCpuTask(m_approvalTimePerBlock,
+                                               MakeCallback(&BidlApplication::CompleteApproval, this).Bind(block.blockId));
             }
             return;
         }
@@ -541,7 +819,12 @@ namespace ns3 {
         BidlBlockState& block = iterator->second;
         block.persistSent = true;
         block.persistSenders.insert(m_nodeId);
+        block.storageCompletedAt = Simulator::Now();
         m_phaseChangedTrace(m_nodeId, blockId, BIDL_STORAGE_COMPLETE, Simulator::Now() - block.firstSeen);
+        Time persistenceLatency = block.storageCompletedAt - block.persistenceStartedAt;
+        Time executionLatency = block.executionCompletedAt - block.executionStartedAt;
+        m_phaseChangedTrace(m_nodeId, blockId, BIDL_P3_PERSIST, persistenceLatency);
+        m_phaseChangedTrace(m_nodeId, blockId, BIDL_P4_EXECUTION_TOTAL, executionLatency + persistenceLatency);
 
         ConsensusMessage persist;
         persist.protocol = ConsensusProtocol::GENERIC;
@@ -555,15 +838,29 @@ namespace ns3 {
     }
 
     void BidlApplication::TryCommit(BidlBlockState& block) {
-        if (block.committed || !block.persistSent || block.persistSenders.size() < 2 * m_faultTolerance + 1) {
+        if (block.committed || block.commitScheduled || !block.persistSent ||
+            block.persistSenders.size() < 2 * m_faultTolerance + 1) {
             return;
         }
+        block.commitScheduled = true;
+        m_resourceModel->SubmitCpuTask(m_commitProcessingTime,
+                                       MakeCallback(&BidlApplication::CompleteCommit, this).Bind(block.blockId));
+    }
+
+    void BidlApplication::CompleteCommit(uint64_t blockId) {
+        auto iterator = m_blocks.find(blockId);
+        if (iterator == m_blocks.end() || iterator->second.committed) {
+            return;
+        }
+        BidlBlockState& block = iterator->second;
         block.committed = true;
         ++m_committedBlocks;
         m_committedTransactions += block.transactionCount;
         m_lastCommit = Simulator::Now();
         m_blockCommittedTrace(m_nodeId, block.blockId, m_lastCommit - block.firstSeen);
         m_phaseChangedTrace(m_nodeId, block.blockId, BIDL_BLOCK_COMMITTED, m_lastCommit - block.firstSeen);
+        m_phaseChangedTrace(m_nodeId, block.blockId, BIDL_P5_COMMIT, m_lastCommit - block.storageCompletedAt);
+        m_phaseChangedTrace(m_nodeId, block.blockId, BIDL_END_TO_END, m_lastCommit - block.firstSeen);
 
         ConsensusMessage committed;
         committed.protocol = ConsensusProtocol::GENERIC;

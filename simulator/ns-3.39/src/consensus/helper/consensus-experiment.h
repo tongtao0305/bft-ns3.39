@@ -151,6 +151,7 @@ namespace ns3 {
         std::vector<uint32_t> replicaPhysicalIds;
         std::vector<uint32_t> ordererPhysicalIds;
         std::vector<uint32_t> executorPhysicalIds;
+        std::vector<uint32_t> maliciousPhysicalIds;
     };
 
     /**
@@ -160,6 +161,7 @@ namespace ns3 {
         std::string preset;
         std::string configFile;
         std::string architecture{"replicated"};
+        std::string bidlIngressMode{"direct"};
         std::string workload{"auto"};
         std::string workloadProvider;
         std::string scenario{"consensus"};
@@ -177,6 +179,7 @@ namespace ns3 {
         std::string replicaPhysicalIds;
         std::string ordererPhysicalIds;
         std::string executorPhysicalIds;
+        std::string bidlMaliciousPhysicalIds;
         std::string ecnKminMap;
         std::string ecnKmaxMap;
         std::string ecnPmaxMap;
@@ -191,6 +194,10 @@ namespace ns3 {
         uint32_t requestSize{1024};
         uint32_t transactionsPerRequest{1};
         uint32_t batchSize{2};
+        uint32_t resourceCpuCores{1};
+        uint32_t resourceStorageChannels{1};
+        uint32_t bidlMaliciousNodeCount{1};
+        uint32_t bidlAttackTargetExecutors{1};
         uint32_t burstSize{10};
         uint32_t backgroundFlows{0};
         uint32_t backgroundPacketSize{1400};
@@ -257,11 +264,24 @@ namespace ns3 {
         uint16_t faultMessageType{0};
         bool faultAffectSend{false};
         bool enableEcn{true};
+        bool bidlAttackEnabled{false};
         double requestRate{1000.0};
         double requestTimeoutMs{500.0};
         double retransmissionTimeoutMs{50.0};
         double viewChangeTimeoutMs{200.0};
         double batchTimeoutMs{5.0};
+        double sequencerServiceUs{20.0};
+        double transactionVerificationUs{10.0};
+        double pbftMessageProcessingUs{5.0};
+        double executionTimePerTransactionUs{15.0};
+        double approvalTimePerBlockUs{100.0};
+        double storageTimePerBlockUs{500.0};
+        double consensusSoftwareTimePerBlockUs{10000.0};
+        double commitProcessingTimePerBlockUs{2500.0};
+        double bidlAttackProbability{1.0};
+        double bidlAttackStartMs{0.0};
+        double bidlAttackStopMs{0.0};
+        double bidlAttackProcessingUs{20.0};
         double burstIntervalMs{10.0};
         double closedLoopThinkTimeUs{0.0};
         double applicationStartTime{1.0};
@@ -289,6 +309,7 @@ namespace ns3 {
         ConsensusTopology BuildRdmaTopology(uint32_t endpointCount) const;
         bool HasLegacyBlockchainWorkload() const;
         uint32_t GetEffectiveClientCount() const;
+        uint32_t GetEffectiveBidlMaliciousNodeCount() const;
         uint16_t GetConsensusPort(uint16_t fallback) const;
         uint16_t GetConsensusPriorityGroup() const;
         Time GetApplicationStart() const;
@@ -393,6 +414,9 @@ namespace ns3 {
         void OnBidlPhase(uint32_t nodeId, uint64_t blockId, uint16_t phase, Time elapsed);
         void OnBidlBatch(uint32_t nodeId, uint64_t blockId, uint32_t transactions);
         void OnBidlCommit(uint32_t nodeId, uint64_t blockId, Time latency);
+        void OnBidlForged(uint32_t nodeId, uint64_t sequence, uint32_t messages, uint64_t bytes);
+        void OnBidlConflictRejected(uint32_t nodeId, uint64_t sequence, uint32_t senderId);
+        void OnBidlReexecution(uint32_t nodeId, uint64_t blockId, uint32_t transactions, Time latency);
         void OnBackgroundFlowCompleted(uint32_t receiverId, uint32_t senderId, uint64_t flowId, uint32_t bytes, Time fct);
         void OnDeviceTx(uint32_t device, Ptr<const Packet> packet);
         void OnDeviceRx(uint32_t device, Ptr<const Packet> packet);
@@ -427,6 +451,14 @@ namespace ns3 {
         uint64_t m_viewChanges;
         uint64_t m_bidlBlocks;
         uint64_t m_bidlTransactions;
+        uint64_t m_bidlForgedTransactions;
+        uint64_t m_bidlForgedMessages;
+        uint64_t m_bidlForgedBytes;
+        uint64_t m_bidlRejectedConflicts;
+        uint64_t m_bidlReexecutionEvents;
+        uint64_t m_bidlReexecutedTransactions;
+        std::set<uint64_t> m_bidlAffectedBlocks;
+        std::vector<Time> m_bidlReexecutionLatencies;
         std::set<uint64_t> m_views;
         std::set<uint64_t> m_committedBidlBlocks;
         Time m_firstSubmission;

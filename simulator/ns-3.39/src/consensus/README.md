@@ -24,6 +24,20 @@ before topology construction.
 
 Built-in presets are `pbft-tcp`, `pbft-rdma`, `bidl-tcp`, and `bidl-rdma`.
 
+The default BIDL service profile is intended for network-focused experiments: 20 us of sequencer
+service per transaction, 10 us of effective verification, 15 us of effective execution, 5 us of
+PBFT receive processing per message, and 100/500 us per block for approval and persistence. A
+calibrated 10 ms consensus software residual and 2.5 ms local commit cost represent cryptography,
+thread scheduling, and framework work that is outside the packet-level model. Verification and
+execution are effective multi-worker service times, not
+single-core cryptographic microbenchmarks. They keep a serial executor near 40 kTx/s so network
+congestion can be studied without the old 250 us execution delay imposing a 4 kTx/s CPU ceiling.
+
+The BIDL phase trace also exports paper-style measurements: phase 6 is P1 consensus
+(proposal-to-decision), phase 7 is P2 verification and execution, phase 8 is P3 persistence, phase 9
+is P4 execution total (P2 + P3), phase 10 is P5 commit, and phase 11 is ingress-to-commit end-to-end
+latency. Named P50 and P95 values are included in `-summary.csv`.
+
 ```sh
 build/src/consensus/examples/ns3.39-consensus-example-default \
   --preset=pbft-rdma --requestCount=100 --outputPrefix=results/pbft-rdma
@@ -35,6 +49,25 @@ build/src/consensus/examples/ns3.39-consensus-example-default \
 Configuration files use one `key=value` entry per line. Resolution order is built-in defaults,
 selected preset, configuration file, then command-line overrides. See
 `examples/consensus-experiment.conf`.
+
+`examples/bidl-k4-fat-tree.conf` selects the file-backed classic k=4 Fat-Tree topology: 16 hosts,
+8 edge switches, 8 aggregation switches, and 4 core switches. Its BIDL orderers and executors are
+placed one per pod, with the sequencer on a separate host.
+
+The same configuration reserves host 3 for an optional malicious broadcaster. Enable it with
+`--bidlAttackEnabled=true`. The broadcaster observes sequencer transactions, keeps each sequence
+number, changes its digest, and sends the forged copy over the simulated network. Executors retain
+the first digest received for each sequence and reject later conflicts; only a mismatch against the
+ordered block digest causes whole-block re-execution. `bidlAttackProbability`,
+`bidlAttackTargetExecutors`, `bidlAttackStartMs`, `bidlAttackStopMs`, and
+`bidlAttackProcessingUs` control the attack. The summary reports forged transactions/messages/bytes,
+rejected conflicts, affected blocks, and re-execution counts and latency.
+
+`examples/bidl-attacker-bypass.conf` is a controlled asymmetric-path attack experiment. Normal
+sequencer-to-executor traffic crosses switch link 10-11 together with a same-priority RDMA background
+flow, while sequencer-to-malicious-to-executor traffic uses the independent 10-12-14-13 bypass. Its
+150 us attack processing time is chosen so that the forgery loses the race without background
+traffic but can win when the direct path is congested.
 
 ```sh
 build/src/consensus/examples/ns3.39-consensus-example-default \

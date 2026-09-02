@@ -616,6 +616,7 @@ namespace ns3 {
         command.AddValue("preset", "Built-in experiment preset", preset);
         command.AddValue("configFile", "key=value experiment configuration file", configFile);
         command.AddValue("architecture", "Application architecture: replicated or bidl", architecture);
+        command.AddValue("bidlIngressMode", "BIDL ingress: direct or network", bidlIngressMode);
         command.AddValue("workload", "Workload mode: auto, open-loop, closed-loop, burst, or trace", workload);
         command.AddValue("workloadProvider", "Optional ns-3 TypeId implementing ConsensusWorkloadProvider", workloadProvider);
         command.AddValue("scenario", "Scenario name stored with the results", scenario);
@@ -629,6 +630,8 @@ namespace ns3 {
         command.AddValue("replicaPhysicalIds", "Comma-separated PBFT replica physical hosts; primary first", replicaPhysicalIds);
         command.AddValue("ordererPhysicalIds", "Comma-separated BIDL orderer physical hosts", ordererPhysicalIds);
         command.AddValue("executorPhysicalIds", "Comma-separated BIDL executor physical hosts", executorPhysicalIds);
+        command.AddValue("bidlMaliciousPhysicalIds", "Comma-separated physical hosts for BIDL malicious broadcasters",
+                         bidlMaliciousPhysicalIds);
         command.AddValue("transport", "Consensus transport: tcp or rdma", transport);
         command.AddValue("dataRate", "Link data rate", dataRate);
         command.AddValue("linkDelay", "Link propagation delay", linkDelay);
@@ -644,12 +647,34 @@ namespace ns3 {
         command.AddValue("retransmissionTimeoutMs", "PBFT phase retransmission timeout in ms", retransmissionTimeoutMs);
         command.AddValue("viewChangeTimeoutMs", "PBFT unresolved-instance timeout in ms", viewChangeTimeoutMs);
         command.AddValue("batchTimeoutMs", "Maximum BIDL partial-batch wait in ms", batchTimeoutMs);
+        command.AddValue("sequencerServiceUs", "BIDL sequencer service time per transaction in us", sequencerServiceUs);
+        command.AddValue("transactionVerificationUs", "BIDL transaction verification service time in us", transactionVerificationUs);
+        command.AddValue("pbftMessageProcessingUs", "PBFT receive processing service time per message in us", pbftMessageProcessingUs);
+        command.AddValue("executionTimePerTransactionUs", "BIDL execution service time per transaction in us",
+                         executionTimePerTransactionUs);
+        command.AddValue("approvalTimePerBlockUs", "BIDL result approval service time per block in us", approvalTimePerBlockUs);
+        command.AddValue("storageTimePerBlockUs", "BIDL storage service time per block in us", storageTimePerBlockUs);
+        command.AddValue("consensusSoftwareTimePerBlockUs",
+                         "BIDL per-block consensus crypto, scheduling, and framework overhead in us",
+                         consensusSoftwareTimePerBlockUs);
+        command.AddValue("commitProcessingTimePerBlockUs", "BIDL local commit processing time per block in us",
+                         commitProcessingTimePerBlockUs);
+        command.AddValue("bidlAttackEnabled", "Enable malicious transaction broadcaster nodes", bidlAttackEnabled);
+        command.AddValue("bidlMaliciousNodeCount", "Number of malicious broadcaster nodes", bidlMaliciousNodeCount);
+        command.AddValue("bidlAttackTargetExecutors", "Executors targeted per forged transaction; zero targets all",
+                         bidlAttackTargetExecutors);
+        command.AddValue("bidlAttackProbability", "Probability of forging each observed transaction", bidlAttackProbability);
+        command.AddValue("bidlAttackStartMs", "Attack start time in ms", bidlAttackStartMs);
+        command.AddValue("bidlAttackStopMs", "Attack stop time in ms; zero means simulation end", bidlAttackStopMs);
+        command.AddValue("bidlAttackProcessingUs", "Malicious processing time per forged transaction in us", bidlAttackProcessingUs);
         command.AddValue("simulationTime", "Simulation stop time in seconds", simulationTime);
         command.AddValue("applicationStartTime", "Application start time in seconds", applicationStartTime);
         command.AddValue("warmupTime", "Warm-up duration excluded from metrics", warmupTime);
         command.AddValue("measurementTime", "Measurement duration; zero uses the remaining interval", measurementTime);
         command.AddValue("cooldownTime", "Cooldown duration after the measurement window", cooldownTime);
         command.AddValue("batchSize", "Transactions in one BIDL batch", batchSize);
+        command.AddValue("resourceCpuCores", "CPU service channels per consensus application", resourceCpuCores);
+        command.AddValue("resourceStorageChannels", "Storage service channels per consensus application", resourceStorageChannels);
         command.AddValue("burstSize", "Requests per client in each synthetic burst", burstSize);
         command.AddValue("burstIntervalMs", "Interval between request bursts in ms", burstIntervalMs);
         command.AddValue("closedLoopThinkTimeUs", "Think time after each completed closed-loop request", closedLoopThinkTimeUs);
@@ -733,6 +758,12 @@ namespace ns3 {
         if (architecture != "replicated" && architecture != "bidl") {
             throw std::invalid_argument("architecture must be replicated or bidl");
         }
+        if (bidlIngressMode != "direct" && bidlIngressMode != "network") {
+            throw std::invalid_argument("bidlIngressMode must be direct or network");
+        }
+        if (architecture == "bidl" && bidlIngressMode == "direct" && workload == "closed-loop") {
+            throw std::invalid_argument("direct BIDL ingress supports open-loop, burst, auto, and trace workloads");
+        }
         if (engine.empty()) {
             throw std::invalid_argument("engine must not be empty");
         }
@@ -748,7 +779,8 @@ namespace ns3 {
         if (requestRate <= 0.0 || requestTimeoutMs <= 0.0 || retransmissionTimeoutMs <= 0.0 || viewChangeTimeoutMs <= 0.0 ||
             batchTimeoutMs <= 0.0 || simulationTime <= 0.0 || applicationStartTime < 0.0 || warmupTime < 0.0 ||
             measurementTime < 0.0 || cooldownTime < 0.0 || requestCount == 0 || requestSize == 0 || transactionsPerRequest == 0 ||
-            clientCount == 0 || batchSize == 0 || burstSize == 0 || burstIntervalMs <= 0.0 || closedLoopThinkTimeUs < 0.0 || rdmaMtu == 0 ||
+            clientCount == 0 || batchSize == 0 || resourceCpuCores == 0 || resourceStorageChannels == 0 || burstSize == 0 ||
+            burstIntervalMs <= 0.0 || closedLoopThinkTimeUs < 0.0 || rdmaMtu == 0 ||
             rdmaAckInterval == 0 || rdmaL2ChunkSize == 0 || switchBufferBytes == 0 || leafCount == 0 || spineCount == 0 ||
             switchPolicy.empty() || rdmaBackgroundPriorityGroup > 7 || rdmaLongFlowBytes == 0 || rdmaShortFlowBytes == 0 ||
             rdmaIncastFlowBytes == 0 || rdmaLongStartMs < 0.0 || rdmaShortStartMs < 0.0 || rdmaShortIntervalUs <= 0.0 ||
@@ -757,7 +789,12 @@ namespace ns3 {
             rdmaEwmaGain > 1.0 || rdmaTargetUtilization <= 0.0 || rdmaTargetUtilization > 1.0 || pintLogBase <= 1.0 ||
             pintProbability < 0.0 || pintProbability > 1.0 || linkErrorRate < 0.0 || linkErrorRate > 1.0 || messageDropProbability < 0.0 ||
             messageDropProbability > 1.0 || messageDelayUs < 0.0 || failureStartMs < 0.0 || failureStopMs < 0.0 ||
-            (failureStopMs > 0.0 && failureStopMs <= failureStartMs)) {
+            (failureStopMs > 0.0 && failureStopMs <= failureStartMs) || sequencerServiceUs < 0.0 ||
+            transactionVerificationUs < 0.0 || pbftMessageProcessingUs < 0.0 || executionTimePerTransactionUs < 0.0 ||
+            approvalTimePerBlockUs < 0.0 || storageTimePerBlockUs < 0.0 || consensusSoftwareTimePerBlockUs < 0.0 ||
+            commitProcessingTimePerBlockUs < 0.0 || bidlAttackProbability < 0.0 || bidlAttackProbability > 1.0 ||
+            bidlAttackStartMs < 0.0 || bidlAttackStopMs < 0.0 ||
+            (bidlAttackStopMs > 0.0 && bidlAttackStopMs <= bidlAttackStartMs) || bidlAttackProcessingUs < 0.0) {
             throw std::invalid_argument("request and batch parameters must be positive");
         }
         if (GetMeasurementStop() <= GetMeasurementStart() || GetMeasurementStop() > Seconds(simulationTime)) {
@@ -802,6 +839,7 @@ namespace ns3 {
         auto replicas = ParseIdList(replicaPhysicalIds);
         auto orderers = ParseIdList(ordererPhysicalIds);
         auto executors = ParseIdList(executorPhysicalIds);
+        auto malicious = ParseIdList(bidlMaliciousPhysicalIds);
         if (!replicas.empty() && replicas.size() != replicaCount) {
             throw std::invalid_argument("replicaPhysicalIds must contain replicaCount hosts");
         }
@@ -813,6 +851,9 @@ namespace ns3 {
         }
         if ((!orderers.empty() && orderers.size() != replicaCount) || (!executors.empty() && executors.size() != replicaCount)) {
             throw std::invalid_argument("BIDL physical role lists must contain replicaCount hosts");
+        }
+        if (!malicious.empty() && malicious.size() != bidlMaliciousNodeCount) {
+            throw std::invalid_argument("bidlMaliciousPhysicalIds must contain bidlMaliciousNodeCount hosts");
         }
         std::vector<LegacyFlowRecord> blockchainFlows = GetLegacyBlockchainFlows(flowFile);
         if (!blockchainFlows.empty()) {
@@ -868,6 +909,7 @@ namespace ns3 {
         helper.SetEngineAttribute("FaultTolerance", UintegerValue(faultTolerance));
         helper.SetEngineAttribute("RetransmissionTimeout", TimeValue(MilliSeconds(retransmissionTimeoutMs)));
         helper.SetEngineAttribute("InstanceTimeout", TimeValue(MilliSeconds(viewChangeTimeoutMs)));
+        helper.SetEngineAttribute("MessageProcessingTime", TimeValue(MicroSeconds(pbftMessageProcessingUs)));
 
         helper.SetTransport(GetTransportType());
         if (UsesRdmaNetwork()) {
@@ -896,6 +938,20 @@ namespace ns3 {
         helper.SetBidlAttribute("FaultTolerance", UintegerValue(faultTolerance));
         helper.SetBidlAttribute("BatchSize", UintegerValue(batchSize));
         helper.SetBidlAttribute("BatchTimeout", TimeValue(MilliSeconds(batchTimeoutMs)));
+        helper.SetBidlAttribute("SequencerServiceTime", TimeValue(MicroSeconds(sequencerServiceUs)));
+        helper.SetBidlAttribute("TransactionVerificationTime", TimeValue(MicroSeconds(transactionVerificationUs)));
+        helper.SetBidlAttribute("ExecutionTimePerTransaction", TimeValue(MicroSeconds(executionTimePerTransactionUs)));
+        helper.SetBidlAttribute("ApprovalTimePerBlock", TimeValue(MicroSeconds(approvalTimePerBlockUs)));
+        helper.SetBidlAttribute("StorageTime", TimeValue(MicroSeconds(storageTimePerBlockUs)));
+        helper.SetBidlAttribute("ConsensusSoftwareTime", TimeValue(MicroSeconds(consensusSoftwareTimePerBlockUs)));
+        helper.SetBidlAttribute("CommitProcessingTime", TimeValue(MicroSeconds(commitProcessingTimePerBlockUs)));
+        helper.SetBidlAttribute("AttackProbability", DoubleValue(bidlAttackProbability));
+        helper.SetBidlAttribute("AttackStart", TimeValue(MilliSeconds(bidlAttackStartMs)));
+        helper.SetBidlAttribute("AttackStop", TimeValue(MilliSeconds(bidlAttackStopMs)));
+        helper.SetBidlAttribute("AttackProcessingTime", TimeValue(MicroSeconds(bidlAttackProcessingUs)));
+        helper.SetBidlAttribute("AttackTargetExecutors", UintegerValue(bidlAttackTargetExecutors));
+        helper.SetResourceAttribute("CpuCores", UintegerValue(resourceCpuCores));
+        helper.SetResourceAttribute("StorageChannels", UintegerValue(resourceStorageChannels));
     }
 
     std::string ConsensusExperimentConfig::GetEngineType() const {
@@ -934,6 +990,7 @@ namespace ns3 {
                << "  \"preset\": \"" << EscapeJson(preset) << "\",\n"
                << "  \"config_file\": \"" << EscapeJson(configFile) << "\",\n"
                << "  \"architecture\": \"" << EscapeJson(architecture) << "\",\n"
+               << "  \"bidl_ingress_mode\": \"" << EscapeJson(bidlIngressMode) << "\",\n"
                << "  \"workload\": \"" << EscapeJson(workload) << "\",\n"
                << "  \"workload_provider\": \"" << EscapeJson(workloadProvider) << "\",\n"
                << "  \"scenario\": \"" << EscapeJson(scenario) << "\",\n"
@@ -948,6 +1005,7 @@ namespace ns3 {
                << "  \"replica_physical_ids\": \"" << EscapeJson(replicaPhysicalIds) << "\",\n"
                << "  \"orderer_physical_ids\": \"" << EscapeJson(ordererPhysicalIds) << "\",\n"
                << "  \"executor_physical_ids\": \"" << EscapeJson(executorPhysicalIds) << "\",\n"
+               << "  \"bidl_malicious_physical_ids\": \"" << EscapeJson(bidlMaliciousPhysicalIds) << "\",\n"
                << "  \"transport\": \"" << EscapeJson(transport) << "\",\n"
                << "  \"data_rate\": \"" << EscapeJson(dataRate) << "\",\n"
                << "  \"link_delay\": \"" << EscapeJson(linkDelay) << "\",\n"
@@ -963,12 +1021,29 @@ namespace ns3 {
                << "  \"retransmission_timeout_ms\": " << retransmissionTimeoutMs << ",\n"
                << "  \"view_change_timeout_ms\": " << viewChangeTimeoutMs << ",\n"
                << "  \"batch_timeout_ms\": " << batchTimeoutMs << ",\n"
+               << "  \"sequencer_service_us\": " << sequencerServiceUs << ",\n"
+               << "  \"transaction_verification_us\": " << transactionVerificationUs << ",\n"
+               << "  \"pbft_message_processing_us\": " << pbftMessageProcessingUs << ",\n"
+               << "  \"execution_time_per_transaction_us\": " << executionTimePerTransactionUs << ",\n"
+               << "  \"approval_time_per_block_us\": " << approvalTimePerBlockUs << ",\n"
+               << "  \"storage_time_per_block_us\": " << storageTimePerBlockUs << ",\n"
+               << "  \"consensus_software_time_per_block_us\": " << consensusSoftwareTimePerBlockUs << ",\n"
+               << "  \"commit_processing_time_per_block_us\": " << commitProcessingTimePerBlockUs << ",\n"
+               << "  \"bidl_attack_enabled\": " << (bidlAttackEnabled ? "true" : "false") << ",\n"
+               << "  \"bidl_malicious_node_count\": " << bidlMaliciousNodeCount << ",\n"
+               << "  \"bidl_attack_target_executors\": " << bidlAttackTargetExecutors << ",\n"
+               << "  \"bidl_attack_probability\": " << bidlAttackProbability << ",\n"
+               << "  \"bidl_attack_start_ms\": " << bidlAttackStartMs << ",\n"
+               << "  \"bidl_attack_stop_ms\": " << bidlAttackStopMs << ",\n"
+               << "  \"bidl_attack_processing_us\": " << bidlAttackProcessingUs << ",\n"
                << "  \"simulation_time\": " << simulationTime << ",\n"
                << "  \"application_start_time\": " << applicationStartTime << ",\n"
                << "  \"warmup_time\": " << warmupTime << ",\n"
                << "  \"measurement_time\": " << measurementTime << ",\n"
                << "  \"cooldown_time\": " << cooldownTime << ",\n"
                << "  \"batch_size\": " << batchSize << ",\n"
+               << "  \"resource_cpu_cores\": " << resourceCpuCores << ",\n"
+               << "  \"resource_storage_channels\": " << resourceStorageChannels << ",\n"
                << "  \"burst_size\": " << burstSize << ",\n"
                << "  \"burst_interval_ms\": " << burstIntervalMs << ",\n"
                << "  \"closed_loop_think_time_us\": " << closedLoopThinkTimeUs << ",\n"
@@ -1074,6 +1149,10 @@ namespace ns3 {
         return clientCount;
     }
 
+    uint32_t ConsensusExperimentConfig::GetEffectiveBidlMaliciousNodeCount() const {
+        return bidlAttackEnabled ? bidlMaliciousNodeCount : 0;
+    }
+
     uint16_t ConsensusExperimentConfig::GetConsensusPort(uint16_t fallback) const {
         std::vector<LegacyFlowRecord> flows = GetLegacyBlockchainFlows(flowFile);
         return flows.empty() ? fallback : flows.front().destinationPort;
@@ -1156,19 +1235,26 @@ namespace ns3 {
     }
 
     ConsensusRolePlacement ConsensusExperimentConfig::ResolveBidlPlacement(const ConsensusTopology& topologyResult) const {
-        const uint32_t effectiveClients = GetEffectiveClientCount();
-        if (topologyResult.endpointPhysicalIds.size() < 2 * replicaCount + 1 + effectiveClients) {
-            throw std::invalid_argument("BIDL placement requires orderers, executors, a sequencer, and clients");
+        const uint32_t effectiveClients = bidlIngressMode == "network" ? GetEffectiveClientCount() : 0;
+        const uint32_t effectiveMalicious = GetEffectiveBidlMaliciousNodeCount();
+        if (topologyResult.endpointPhysicalIds.size() < 2 * replicaCount + 1 + effectiveClients + effectiveMalicious) {
+            throw std::invalid_argument("BIDL placement requires orderers, executors, a sequencer, clients, and malicious nodes");
         }
         std::vector<LegacyFlowRecord> flows = GetLegacyBlockchainFlows(flowFile);
         ConsensusRolePlacement placement;
         placement.ordererPhysicalIds = ParseIdList(ordererPhysicalIds);
         placement.executorPhysicalIds = ParseIdList(executorPhysicalIds);
         placement.clientPhysicalIds = ParseIdList(clientPhysicalIds);
-        if (placement.clientPhysicalIds.empty() && clientPhysicalId != std::numeric_limits<uint32_t>::max()) {
+        placement.maliciousPhysicalIds = bidlAttackEnabled ? ParseIdList(bidlMaliciousPhysicalIds) : std::vector<uint32_t>{};
+        if (bidlIngressMode == "direct") {
+            placement.clientPhysicalIds.clear();
+        }
+        if (bidlIngressMode == "network" && placement.clientPhysicalIds.empty() &&
+            clientPhysicalId != std::numeric_limits<uint32_t>::max()) {
             placement.clientPhysicalIds.push_back(clientPhysicalId);
         }
-        if (placement.clientPhysicalIds.empty() && !flows.empty() && (workload == "auto" || workload == "trace")) {
+        if (bidlIngressMode == "network" && placement.clientPhysicalIds.empty() && !flows.empty() &&
+            (workload == "auto" || workload == "trace")) {
             std::set<uint32_t> sources;
             for (const auto& flow : flows) {
                 if (sources.insert(flow.source).second) {
@@ -1188,6 +1274,12 @@ namespace ns3 {
                 throw std::invalid_argument("BIDL client and sequencer must use different hosts");
             }
         }
+        for (uint32_t physicalId : placement.maliciousPhysicalIds) {
+            ValidatePhysicalHost(topologyResult, physicalId, "BIDL malicious broadcaster");
+            if (!used.insert(physicalId).second) {
+                throw std::invalid_argument("BIDL malicious node placement overlaps");
+            }
+        }
         for (uint32_t physicalId : placement.ordererPhysicalIds) {
             ValidatePhysicalHost(topologyResult, physicalId, "BIDL orderer");
             if (!used.insert(physicalId).second) {
@@ -1203,7 +1295,9 @@ namespace ns3 {
         }
         AppendAvailableHosts(placement.executorPhysicalIds, replicaCount, topologyResult, used);
         AppendAvailableHosts(placement.clientPhysicalIds, effectiveClients, topologyResult, used);
-        placement.clientPhysicalId = placement.clientPhysicalIds.front();
+        AppendAvailableHosts(placement.maliciousPhysicalIds, effectiveMalicious, topologyResult, used);
+        placement.clientPhysicalId = placement.clientPhysicalIds.empty() ? std::numeric_limits<uint32_t>::max()
+                                                                         : placement.clientPhysicalIds.front();
         return placement;
     }
 
@@ -1837,7 +1931,9 @@ namespace ns3 {
 
     ConsensusStatistics::ConsensusStatistics()
         : m_submittedRequests(0), m_completedRequests(0), m_retransmissions(0), m_timedOutRequests(0), m_decisions(0), m_viewChanges(0),
-          m_bidlBlocks(0), m_bidlTransactions(0), m_firstSubmission(Seconds(0)), m_lastCompletion(Seconds(0)),
+          m_bidlBlocks(0), m_bidlTransactions(0), m_bidlForgedTransactions(0), m_bidlForgedMessages(0), m_bidlForgedBytes(0),
+          m_bidlRejectedConflicts(0), m_bidlReexecutionEvents(0), m_bidlReexecutedTransactions(0),
+          m_firstSubmission(Seconds(0)), m_lastCompletion(Seconds(0)),
           m_measurementStart(Seconds(0)), m_measurementStop(Seconds(0)), m_hasSubmission(false) {}
 
     void ConsensusStatistics::SetMeasurementWindow(Time start, Time stop) {
@@ -1884,6 +1980,10 @@ namespace ns3 {
             application->TraceConnectWithoutContext("PhaseChanged", MakeCallback(&ConsensusStatistics::OnBidlPhase, this));
             application->TraceConnectWithoutContext("BatchCreated", MakeCallback(&ConsensusStatistics::OnBidlBatch, this));
             application->TraceConnectWithoutContext("BlockCommitted", MakeCallback(&ConsensusStatistics::OnBidlCommit, this));
+            application->TraceConnectWithoutContext("ForgedTransaction", MakeCallback(&ConsensusStatistics::OnBidlForged, this));
+            application->TraceConnectWithoutContext("ConflictRejected",
+                                                    MakeCallback(&ConsensusStatistics::OnBidlConflictRejected, this));
+            application->TraceConnectWithoutContext("BlockReexecution", MakeCallback(&ConsensusStatistics::OnBidlReexecution, this));
             Ptr<ConsensusEngine> engine = application->GetEngine();
             if (engine) {
                 engine->TraceConnectWithoutContext("LeaderChanged", MakeCallback(&ConsensusStatistics::OnViewChanged, this));
@@ -2056,6 +2156,18 @@ namespace ns3 {
             size_t index = static_cast<size_t>(std::ceil((percentile / 100.0) * backgroundFct.size()) - 1.0);
             return backgroundFct[std::min(index, backgroundFct.size() - 1)];
         };
+        std::vector<double> reexecutionLatency;
+        for (Time value : m_bidlReexecutionLatencies) {
+            reexecutionLatency.push_back(value.GetMicroSeconds());
+        }
+        std::sort(reexecutionLatency.begin(), reexecutionLatency.end());
+        auto reexecutionPercentile = [&reexecutionLatency](double percentile) {
+            if (reexecutionLatency.empty()) {
+                return 0.0;
+            }
+            size_t index = static_cast<size_t>(std::ceil((percentile / 100.0) * reexecutionLatency.size()) - 1.0);
+            return reexecutionLatency[std::min(index, reexecutionLatency.size() - 1)];
+        };
 
         summary << "metric,value,unit\n"
                 << "submitted_requests," << m_submittedRequests << ",requests\n"
@@ -2074,13 +2186,34 @@ namespace ns3 {
                 << "pbft_decided_p95," << GetPhaseLatencyPercentile("pbft", PBFT_DECIDED, 95) << ",microseconds\n"
                 << "bidl_commit_p50," << GetPhaseLatencyPercentile("bidl", BIDL_BLOCK_COMMITTED, 50) << ",microseconds\n"
                 << "bidl_commit_p95," << GetPhaseLatencyPercentile("bidl", BIDL_BLOCK_COMMITTED, 95) << ",microseconds\n"
+                << "bidl_p1_consensus_p50," << GetPhaseLatencyPercentile("bidl", BIDL_P1_CONSENSUS, 50) << ",microseconds\n"
+                << "bidl_p1_consensus_p95," << GetPhaseLatencyPercentile("bidl", BIDL_P1_CONSENSUS, 95) << ",microseconds\n"
+                << "bidl_p2_verify_execute_p50," << GetPhaseLatencyPercentile("bidl", BIDL_P2_VERIFY_EXECUTE, 50) << ",microseconds\n"
+                << "bidl_p2_verify_execute_p95," << GetPhaseLatencyPercentile("bidl", BIDL_P2_VERIFY_EXECUTE, 95) << ",microseconds\n"
+                << "bidl_p3_persist_p50," << GetPhaseLatencyPercentile("bidl", BIDL_P3_PERSIST, 50) << ",microseconds\n"
+                << "bidl_p3_persist_p95," << GetPhaseLatencyPercentile("bidl", BIDL_P3_PERSIST, 95) << ",microseconds\n"
+                << "bidl_p4_execution_total_p50," << GetPhaseLatencyPercentile("bidl", BIDL_P4_EXECUTION_TOTAL, 50) << ",microseconds\n"
+                << "bidl_p4_execution_total_p95," << GetPhaseLatencyPercentile("bidl", BIDL_P4_EXECUTION_TOTAL, 95) << ",microseconds\n"
+                << "bidl_p5_commit_p50," << GetPhaseLatencyPercentile("bidl", BIDL_P5_COMMIT, 50) << ",microseconds\n"
+                << "bidl_p5_commit_p95," << GetPhaseLatencyPercentile("bidl", BIDL_P5_COMMIT, 95) << ",microseconds\n"
+                << "bidl_end_to_end_p50," << GetPhaseLatencyPercentile("bidl", BIDL_END_TO_END, 50) << ",microseconds\n"
+                << "bidl_end_to_end_p95," << GetPhaseLatencyPercentile("bidl", BIDL_END_TO_END, 95) << ",microseconds\n"
                 << "retransmissions," << m_retransmissions << ",messages\n"
                 << "timed_out_requests," << m_timedOutRequests << ",requests\n"
                 << "replica_decisions," << m_decisions << ",decisions\n"
                 << "view_changes," << GetViewChanges() << ",views\n"
                 << "replica_view_transitions," << m_viewChanges << ",events\n"
                 << "bidl_blocks," << m_bidlBlocks << ",blocks\n"
-                << "submitted_transactions," << m_bidlTransactions << ",transactions\n";
+                << "submitted_transactions," << m_bidlTransactions << ",transactions\n"
+                << "bidl_forged_transactions," << m_bidlForgedTransactions << ",transactions\n"
+                << "bidl_forged_messages," << m_bidlForgedMessages << ",messages\n"
+                << "bidl_forged_bytes," << m_bidlForgedBytes << ",bytes\n"
+                << "bidl_rejected_conflicts," << m_bidlRejectedConflicts << ",messages\n"
+                << "bidl_reexecution_events," << m_bidlReexecutionEvents << ",executor_blocks\n"
+                << "bidl_affected_blocks," << m_bidlAffectedBlocks.size() << ",unique_blocks\n"
+                << "bidl_reexecuted_transactions," << m_bidlReexecutedTransactions << ",executor_transactions\n"
+                << "bidl_reexecution_p50," << reexecutionPercentile(50) << ",microseconds\n"
+                << "bidl_reexecution_p95," << reexecutionPercentile(95) << ",microseconds\n";
         summary << "background_completed_flows," << m_backgroundFlows.size() << ",flows\n"
                 << "background_fct_p50," << backgroundPercentile(50) << ",microseconds\n"
                 << "background_fct_p95," << backgroundPercentile(95) << ",microseconds\n";
@@ -2253,9 +2386,42 @@ namespace ns3 {
             return;
         }
         (void)nodeId;
-        (void)latency;
-        m_committedBidlBlocks.insert(blockId);
+        if (m_committedBidlBlocks.insert(blockId).second && m_clients.empty()) {
+            m_requestSamples.push_back({nodeId, blockId, latency});
+        }
         m_lastCompletion = Simulator::Now();
+    }
+
+    void ConsensusStatistics::OnBidlForged(uint32_t nodeId, uint64_t sequence, uint32_t messages, uint64_t bytes) {
+        if (!IsMeasuring()) {
+            return;
+        }
+        (void)nodeId;
+        (void)sequence;
+        ++m_bidlForgedTransactions;
+        m_bidlForgedMessages += messages;
+        m_bidlForgedBytes += bytes;
+    }
+
+    void ConsensusStatistics::OnBidlConflictRejected(uint32_t nodeId, uint64_t sequence, uint32_t senderId) {
+        if (!IsMeasuring()) {
+            return;
+        }
+        (void)nodeId;
+        (void)sequence;
+        (void)senderId;
+        ++m_bidlRejectedConflicts;
+    }
+
+    void ConsensusStatistics::OnBidlReexecution(uint32_t nodeId, uint64_t blockId, uint32_t transactions, Time latency) {
+        if (!IsMeasuring()) {
+            return;
+        }
+        (void)nodeId;
+        ++m_bidlReexecutionEvents;
+        m_bidlReexecutedTransactions += transactions;
+        m_bidlAffectedBlocks.insert(blockId);
+        m_bidlReexecutionLatencies.push_back(latency);
     }
 
     void ConsensusStatistics::OnBackgroundFlowCompleted(uint32_t receiverId, uint32_t senderId, uint64_t flowId, uint32_t bytes, Time fct) {

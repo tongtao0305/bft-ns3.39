@@ -36,3 +36,6 @@ results.txt
 __pycache__/
 .lock*
 .waf*
+
+# Simulation outputs
+simulator/ns-3.39/results/

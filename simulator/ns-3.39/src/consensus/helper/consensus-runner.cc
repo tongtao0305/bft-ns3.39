@@ -44,6 +44,58 @@ namespace ns3 {
             return config.InstallBackgroundTraffic(topology.endpoints, topology.endpointInterfaces);
         }
 
+        uint64_t ScheduleDirectBidlWorkload(const ConsensusExperimentConfig& config, Ptr<BidlApplication> sequencer, Time start,
+                                            Time stop) {
+            if (!sequencer) {
+                throw std::invalid_argument("direct BIDL workload requires a sequencer");
+            }
+            uint64_t scheduled = 0;
+            uint64_t requestId = 1;
+            const Time ready = start + NanoSeconds(1);
+            const bool trace = config.workload == "trace" || (config.workload == "auto" && config.HasLegacyBlockchainWorkload());
+            if (trace) {
+                for (const LegacyFlowRecord& flow : ReadLegacyFlowFile(config.flowFile)) {
+                    if (flow.applicationId != 1) {
+                        continue;
+                    }
+                    Time submission = std::max(ready, NanoSeconds(flow.startTimeNs));
+                    if (submission < stop) {
+                        Simulator::Schedule(submission - Simulator::Now(), &BidlApplication::InjectTransaction, sequencer, flow.bytes, 1,
+                                            requestId++);
+                        ++scheduled;
+                    }
+                }
+            } else if (config.workload == "burst") {
+                for (uint32_t client = 0; client < config.clientCount; ++client) {
+                    for (uint32_t request = 0; request < config.requestCount; ++request) {
+                        Time submission = ready + MilliSeconds((request / config.burstSize) * config.burstIntervalMs);
+                        if (submission < stop) {
+                            Simulator::Schedule(submission - Simulator::Now(), &BidlApplication::InjectTransaction, sequencer,
+                                                config.requestSize, config.transactionsPerRequest, requestId++);
+                            ++scheduled;
+                        }
+                    }
+                }
+            } else {
+                Time interval = Seconds(1.0 / config.requestRate);
+                for (uint32_t client = 0; client < config.clientCount; ++client) {
+                    Time offset = interval * client / config.clientCount;
+                    for (uint32_t request = 0; request < config.requestCount; ++request) {
+                        Time submission = ready + offset + interval * request;
+                        if (submission < stop) {
+                            Simulator::Schedule(submission - Simulator::Now(), &BidlApplication::InjectTransaction, sequencer,
+                                                config.requestSize, config.transactionsPerRequest, requestId++);
+                            ++scheduled;
+                        }
+                    }
+                }
+            }
+            if (scheduled == 0) {
+                throw std::invalid_argument("direct BIDL workload has no transaction in the measurement window");
+            }
+            return scheduled;
+        }
+
         // 从 ConsensusStatistics 中提取完成请求数、完成事务数、吞吐量以及 P50/P95/P99 延迟
         ConsensusRunResult CollectResult(Ptr<ConsensusStatistics> statistics, uint64_t expectedRequests) {
             ConsensusRunResult result;
@@ -292,11 +344,14 @@ namespace ns3 {
     }
 
     ConsensusRunResult ConsensusRunner::RunBidl(const ConsensusExperimentConfig& config, bool writeResults) const {
-        ConsensusTopology topology = config.BuildTopology(2 * config.replicaCount + 1 + config.GetEffectiveClientCount());
+        const uint32_t networkClients = config.bidlIngressMode == "network" ? config.GetEffectiveClientCount() : 0;
+        const uint32_t maliciousNodes = config.GetEffectiveBidlMaliciousNodeCount();
+        ConsensusTopology topology = config.BuildTopology(2 * config.replicaCount + 1 + networkClients + maliciousNodes);
         ConsensusRolePlacement placement = config.ResolveBidlPlacement(topology);
         const uint16_t port = config.GetConsensusPort(9100);
         constexpr uint32_t firstExecutorId = 100;
         constexpr uint32_t sequencerId = 200;
+        constexpr uint32_t firstMaliciousId = 300;
         constexpr uint32_t firstClientId = 1000;
 
         std::vector<uint32_t> ordererIds;
@@ -306,6 +361,10 @@ namespace ns3 {
             executorIds.push_back(firstExecutorId + index);
         }
         const std::vector<uint32_t> sequencerIds{sequencerId};
+        std::vector<uint32_t> maliciousIds;
+        for (uint32_t index = 0; index < maliciousNodes; ++index) {
+            maliciousIds.push_back(firstMaliciousId + index);
+        }
 
         ConsensusEndpointMap endpoints;
         for (uint32_t index = 0; index < config.replicaCount; ++index) {
@@ -316,6 +375,10 @@ namespace ns3 {
         }
         uint32_t sequencerPhysicalId = placement.ingressPhysicalId;
         endpoints.emplace(sequencerIds.front(), InetSocketAddress(topology.nodeAddresses[sequencerPhysicalId], port));
+        for (uint32_t index = 0; index < maliciousIds.size(); ++index) {
+            endpoints.emplace(maliciousIds[index],
+                              InetSocketAddress(topology.nodeAddresses[placement.maliciousPhysicalIds[index]], port));
+        }
         for (uint32_t client = 0; client < placement.clientPhysicalIds.size(); ++client) {
             uint32_t physicalId = placement.clientPhysicalIds[client];
             endpoints.emplace(firstClientId + client, InetSocketAddress(topology.nodeAddresses[physicalId], port));
@@ -341,25 +404,45 @@ namespace ns3 {
                 measuredExecutor = DynamicCast<BidlApplication>(executorApplication.Get(0));
             }
         }
-        applications.Add(helper.InstallBidlNode(topology.nodes.Get(sequencerPhysicalId), sequencerIds.front(), BIDL_SEQUENCER, ordererIds,
-                                                executorIds, sequencerIds, endpoints));
+        ApplicationContainer sequencerApplication =
+            helper.InstallBidlNode(topology.nodes.Get(sequencerPhysicalId), sequencerIds.front(), BIDL_SEQUENCER, ordererIds, executorIds,
+                                   sequencerIds, endpoints);
+        applications.Add(sequencerApplication);
+        Ptr<BidlApplication> sequencer = DynamicCast<BidlApplication>(sequencerApplication.Get(0));
+        for (uint32_t index = 0; index < maliciousIds.size(); ++index) {
+            applications.Add(helper.InstallBidlNode(topology.nodes.Get(placement.maliciousPhysicalIds[index]), maliciousIds[index],
+                                                    BIDL_MALICIOUS, ordererIds, executorIds, sequencerIds, endpoints));
+        }
+        for (uint32_t index = 0; index < applications.GetN(); ++index) {
+            Ptr<BidlApplication> application = DynamicCast<BidlApplication>(applications.Get(index));
+            if (application) {
+                application->SetBroadcasterIds(maliciousIds);
+            }
+        }
         ApplicationContainer clients;
         std::vector<ConsensusWorkloadClient> workloadClients;
-        for (uint32_t client = 0; client < placement.clientPhysicalIds.size(); ++client) {
-            uint32_t physicalId = placement.clientPhysicalIds[client];
-            ApplicationContainer installed =
-                helper.InstallClient(topology.nodes.Get(physicalId), firstClientId + client, sequencerIds.front(), sequencerIds, endpoints);
-            clients.Add(installed);
-            workloadClients.push_back({physicalId, DynamicCast<ConsensusClientApplication>(installed.Get(0))});
+        if (config.bidlIngressMode == "network") {
+            for (uint32_t client = 0; client < placement.clientPhysicalIds.size(); ++client) {
+                uint32_t physicalId = placement.clientPhysicalIds[client];
+                ApplicationContainer installed = helper.InstallClient(topology.nodes.Get(physicalId), firstClientId + client,
+                                                                      sequencerIds.front(), sequencerIds, endpoints);
+                clients.Add(installed);
+                workloadClients.push_back({physicalId, DynamicCast<ConsensusClientApplication>(installed.Get(0))});
+            }
         }
         const Time start = config.GetApplicationStart();
         const Time measurementStart = config.GetMeasurementStart();
         const Time measurementStop = config.GetMeasurementStop();
         const Time stop = Seconds(config.simulationTime);
 
-        Ptr<ConsensusWorkloadProvider> workload = CreateConsensusWorkloadProvider(config);
-        uint64_t expectedRequests =
-            workload->ScheduleRequests(config, workloadClients, topology, placement, measurementStart, measurementStop);
+        Ptr<ConsensusWorkloadProvider> workload;
+        uint64_t expectedRequests = 0;
+        if (config.bidlIngressMode == "direct") {
+            expectedRequests = ScheduleDirectBidlWorkload(config, sequencer, measurementStart, measurementStop);
+        } else {
+            workload = CreateConsensusWorkloadProvider(config);
+            expectedRequests = workload->ScheduleRequests(config, workloadClients, topology, placement, measurementStart, measurementStop);
+        }
         ApplicationContainer background = InstallBackground(config, topology, start);
 
         applications.Start(start);
@@ -381,6 +464,12 @@ namespace ns3 {
         Simulator::Run();
         ConsensusRunResult result = CollectResult(statistics, expectedRequests);
         result.committedBlocks = measuredExecutor->GetCommittedBlocks();
+        if (config.bidlIngressMode == "direct") {
+            result.completedRequests = measuredExecutor->GetCommittedTransactions();
+            result.completedTransactions = result.completedRequests * config.transactionsPerRequest;
+            result.requestThroughput = measuredExecutor->GetTransactionThroughput();
+            result.transactionThroughput = result.requestThroughput * config.transactionsPerRequest;
+        }
         result.success = result.completedRequests == expectedRequests;
         if (writeResults) {
             statistics->WriteResults(config.outputPrefix, config);
