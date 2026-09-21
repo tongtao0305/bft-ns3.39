@@ -39,3 +39,6 @@ __pycache__/
 
 # Simulation outputs
 simulator/ns-3.39/results/
+simulator/ns-3.39/run-logs/
+
+simulator/ns-3.39/examples/BFT/bg-*.txt

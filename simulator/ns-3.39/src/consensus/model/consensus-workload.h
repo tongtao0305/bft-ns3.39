@@ -30,6 +30,7 @@ namespace ns3 {
         uint64_t flowId{0};
         uint32_t bytes{0};
         Time offset{Seconds(0)};
+        uint16_t priorityGroup{3};
     };
 
     /** Generates long, short, trace-driven, and incast RDMA background flows. */
@@ -50,13 +51,15 @@ namespace ns3 {
         void StartApplication() override;
         void StopApplication() override;
         void SendFlow(RdmaWorkloadFlow flow);
+        void DispatchNextFlow();
         void ReceiveFlow(uint32_t peerId, Ptr<Packet> packet);
 
         uint32_t m_nodeId;
         uint64_t m_nextMessageId;
         Ptr<ConsensusTransport> m_transport;
         std::vector<RdmaWorkloadFlow> m_flows;
-        std::vector<EventId> m_events;
+        EventId m_nextEvent;
+        uint32_t m_nextFlowIndex;
         bool m_running;
 
         TracedCallback<uint32_t, uint32_t, uint64_t, uint32_t> m_flowStartedTrace;

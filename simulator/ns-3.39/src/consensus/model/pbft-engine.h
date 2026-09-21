@@ -107,11 +107,16 @@ namespace ns3 {
         ConsensusMessage MakeMessage(ConsensusMessageType type, const PbftInstance& instance);
         bool IsReplica(uint32_t replicaId) const;
         uint32_t GetPrimaryForView(uint64_t view) const;
+        Time GetMessageProcessingTime(const ConsensusMessage& message) const;
 
         uint32_t m_primaryId;
         uint32_t m_faultTolerance;
         uint32_t m_controlPayloadBytes;
         Time m_messageProcessingTime;
+        Time m_prePrepareProcessingTime;
+        Time m_prepareProcessingTime;
+        Time m_commitProcessingTime;
+        Time m_viewChangeProcessingTime;
         Time m_retransmissionTimeout;
         Time m_instanceTimeout;
         uint32_t m_maxRetransmissions;

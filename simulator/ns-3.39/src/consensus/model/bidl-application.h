@@ -88,6 +88,9 @@ namespace ns3 {
 
         uint64_t GetCommittedBlocks() const;
         uint64_t GetCommittedTransactions() const;
+        uint64_t GetSequencedTransactions() const;
+        uint64_t GetSequencerCommittedTransactions() const;
+        bool IsSequencer() const;
         double GetTransactionThroughput() const;
         Ptr<ConsensusEngine> GetEngine() const;
 
@@ -97,6 +100,7 @@ namespace ns3 {
         private:
         void StartApplication() override;
         void StopApplication() override;
+        void SampleExecutionBacklog();
 
         void EnqueueTransaction(const ClientRequest& transaction);
         void CompleteSequencerService(uint32_t clientId, uint64_t requestId, uint32_t payloadSize, uint32_t transactionCount,
@@ -186,6 +190,7 @@ namespace ns3 {
         std::set<uint64_t> m_committedBlockIds;
         std::set<uint64_t> m_tracedBlocks;
         EventId m_batchEvent;
+        EventId m_backlogEvent;
         bool m_executionBusy;
         uint64_t m_committedBlocks;
         uint64_t m_committedTransactions;
@@ -196,13 +201,16 @@ namespace ns3 {
         Ptr<UniformRandomVariable> m_attackRandom;
 
         TracedCallback<uint32_t, uint64_t, uint32_t> m_batchCreatedTrace;
-        TracedCallback<uint32_t, uint64_t, Time> m_blockCommittedTrace;
+        TracedCallback<uint32_t, uint64_t, uint32_t, Time> m_blockCommittedTrace;
+        TracedCallback<uint32_t, uint64_t, Time> m_transactionCommittedTrace;
+        TracedCallback<uint32_t, uint64_t, uint32_t, Time, Time> m_blockCommitTimeTrace;
         TracedCallback<uint32_t, uint32_t, uint16_t, uint64_t, uint32_t> m_messageTxTrace;
         TracedCallback<uint32_t, uint32_t, uint16_t, uint64_t, uint32_t> m_messageRxTrace;
         TracedCallback<uint32_t, uint64_t, uint16_t, Time> m_phaseChangedTrace;
         TracedCallback<uint32_t, uint64_t, uint32_t, uint64_t> m_forgedTransactionTrace;
         TracedCallback<uint32_t, uint64_t, uint32_t> m_conflictRejectedTrace;
         TracedCallback<uint32_t, uint64_t, uint32_t, Time> m_blockReexecutionTrace;
+        TracedCallback<uint32_t, uint32_t, uint32_t, uint32_t> m_executionBacklogTrace;
     };
 
 } // namespace ns3

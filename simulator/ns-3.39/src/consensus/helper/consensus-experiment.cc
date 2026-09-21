@@ -650,6 +650,10 @@ namespace ns3 {
         command.AddValue("sequencerServiceUs", "BIDL sequencer service time per transaction in us", sequencerServiceUs);
         command.AddValue("transactionVerificationUs", "BIDL transaction verification service time in us", transactionVerificationUs);
         command.AddValue("pbftMessageProcessingUs", "PBFT receive processing service time per message in us", pbftMessageProcessingUs);
+        command.AddValue("pbftPrePrepareProcessingUs", "PBFT PRE-PREPARE processing service time in us", pbftPrePrepareProcessingUs);
+        command.AddValue("pbftPrepareProcessingUs", "PBFT PREPARE processing service time in us", pbftPrepareProcessingUs);
+        command.AddValue("pbftCommitProcessingUs", "PBFT COMMIT processing service time in us", pbftCommitProcessingUs);
+        command.AddValue("pbftViewChangeProcessingUs", "PBFT view-change processing service time in us", pbftViewChangeProcessingUs);
         command.AddValue("executionTimePerTransactionUs", "BIDL execution service time per transaction in us",
                          executionTimePerTransactionUs);
         command.AddValue("approvalTimePerBlockUs", "BIDL result approval service time per block in us", approvalTimePerBlockUs);
@@ -742,6 +746,7 @@ namespace ns3 {
         command.AddValue("rdmaIncastFlowBytes", "Bytes per RDMA incast sender", rdmaIncastFlowBytes);
         command.AddValue("rdmaIncastStartMs", "Relative start time of RDMA incast", rdmaIncastStartMs);
         command.AddValue("rdmaIncastIntervalUs", "Spacing between synchronized RDMA incast bursts", rdmaIncastIntervalUs);
+        command.AddValue("rdmaConstantRateGbps", "Sustained total RDMA background rate using periodic fixed-size flows", rdmaConstantRateGbps);
         command.AddValue("messageDropProbability", "Independent receive-side complete-message drop probability", messageDropProbability);
         command.AddValue("messageDelayUs", "Additional receive-side complete-message delay in microseconds", messageDelayUs);
         command.AddValue("failedNodeId", "Logical node isolated by FaultModel; UINT32_MAX disables it", failedNodeId);
@@ -790,9 +795,10 @@ namespace ns3 {
             pintProbability < 0.0 || pintProbability > 1.0 || linkErrorRate < 0.0 || linkErrorRate > 1.0 || messageDropProbability < 0.0 ||
             messageDropProbability > 1.0 || messageDelayUs < 0.0 || failureStartMs < 0.0 || failureStopMs < 0.0 ||
             (failureStopMs > 0.0 && failureStopMs <= failureStartMs) || sequencerServiceUs < 0.0 ||
-            transactionVerificationUs < 0.0 || pbftMessageProcessingUs < 0.0 || executionTimePerTransactionUs < 0.0 ||
+            transactionVerificationUs < 0.0 || pbftMessageProcessingUs < 0.0 || pbftPrePrepareProcessingUs < 0.0 ||
+            pbftPrepareProcessingUs < 0.0 || pbftCommitProcessingUs < 0.0 || pbftViewChangeProcessingUs < 0.0 || executionTimePerTransactionUs < 0.0 ||
             approvalTimePerBlockUs < 0.0 || storageTimePerBlockUs < 0.0 || consensusSoftwareTimePerBlockUs < 0.0 ||
-            commitProcessingTimePerBlockUs < 0.0 || bidlAttackProbability < 0.0 || bidlAttackProbability > 1.0 ||
+            commitProcessingTimePerBlockUs < 0.0 || rdmaConstantRateGbps < 0.0 || bidlAttackProbability < 0.0 || bidlAttackProbability > 1.0 ||
             bidlAttackStartMs < 0.0 || bidlAttackStopMs < 0.0 ||
             (bidlAttackStopMs > 0.0 && bidlAttackStopMs <= bidlAttackStartMs) || bidlAttackProcessingUs < 0.0) {
             throw std::invalid_argument("request and batch parameters must be positive");
@@ -910,6 +916,10 @@ namespace ns3 {
         helper.SetEngineAttribute("RetransmissionTimeout", TimeValue(MilliSeconds(retransmissionTimeoutMs)));
         helper.SetEngineAttribute("InstanceTimeout", TimeValue(MilliSeconds(viewChangeTimeoutMs)));
         helper.SetEngineAttribute("MessageProcessingTime", TimeValue(MicroSeconds(pbftMessageProcessingUs)));
+        helper.SetEngineAttribute("PrePrepareProcessingTime", TimeValue(MicroSeconds(pbftPrePrepareProcessingUs)));
+        helper.SetEngineAttribute("PrepareProcessingTime", TimeValue(MicroSeconds(pbftPrepareProcessingUs)));
+        helper.SetEngineAttribute("CommitProcessingTime", TimeValue(MicroSeconds(pbftCommitProcessingUs)));
+        helper.SetEngineAttribute("ViewChangeProcessingTime", TimeValue(MicroSeconds(pbftViewChangeProcessingUs)));
 
         helper.SetTransport(GetTransportType());
         if (UsesRdmaNetwork()) {
@@ -1800,7 +1810,7 @@ namespace ns3 {
         ApplicationContainer applications;
         const NodeContainer& nodes = topologyResult.endpoints;
         const Ipv4InterfaceContainer& interfaces = topologyResult.endpointInterfaces;
-        if (rdmaLongFlows == 0 && rdmaShortFlows == 0 && rdmaIncastSenders == 0 && flowFile.empty()) {
+        if (rdmaLongFlows == 0 && rdmaShortFlows == 0 && rdmaIncastSenders == 0 && flowFile.empty() && rdmaConstantRateGbps <= 0.0) {
             return applications;
         }
         if (!UsesRdmaNetwork() || nodes.GetN() < 2 || interfaces.GetN() != nodes.GetN()) {
@@ -1857,21 +1867,59 @@ namespace ns3 {
             }
         }
 
+        // Periodic fixed-size flows approximate a sustained offered load.  Unlike a
+        // finite elephant-flow trace, this keeps injecting traffic for the whole
+        // experiment and makes the requested load independent of RDMA flow count.
+        if (rdmaConstantRateGbps > 0.0) {
+            const std::vector<uint32_t> sources{10, 11};
+            const std::vector<uint32_t> destinations{4, 5, 6, 7};
+            constexpr uint32_t CHUNK_BYTES = 4 * 1024 * 1024;
+            const uint64_t pairCount = sources.size() * destinations.size();
+            const double intervalSeconds = (static_cast<double>(CHUNK_BYTES) * 8.0 * pairCount) /
+                                            (rdmaConstantRateGbps * 1e9);
+            const Time interval = Seconds(intervalSeconds);
+            const Time duration = Seconds(std::max(0.0, simulationTime - applicationStartTime));
+            uint64_t rounds = static_cast<uint64_t>(std::ceil(duration.GetSeconds() / intervalSeconds));
+            uint64_t totalFlows = rounds * pairCount;
+            if (totalFlows > 30000) {
+                throw std::invalid_argument("rdmaConstantRateGbps creates too many background flows; increase chunk size or rate");
+            }
+            uint64_t constantFlowId = 900000000;
+            for (uint64_t round = 0; round < rounds; ++round) {
+                Time offset = interval * round;
+                for (uint32_t sourcePhysical : sources) {
+                    auto source = topologyResult.physicalToEndpoint.find(sourcePhysical);
+                    if (source == topologyResult.physicalToEndpoint.end()) {
+                        continue;
+                    }
+                    for (uint32_t destinationPhysical : destinations) {
+                        auto destination = topologyResult.physicalToEndpoint.find(destinationPhysical);
+                        if (destination == topologyResult.physicalToEndpoint.end()) {
+                            continue;
+                        }
+                        workloads[source->second]->AddFlow(
+                            {ID_BASE + destination->second, constantFlowId++, CHUNK_BYTES, offset});
+                    }
+                }
+            }
+        }
+
         if (!flowFile.empty()) {
             std::vector<LegacyFlowRecord> records = ReadLegacyFlowFile(flowFile);
             std::map<std::pair<uint32_t, uint16_t>, Ptr<RdmaWorkloadApplication>> receivers;
+            std::map<uint32_t, Ptr<RdmaConsensusTransport>> senderTransports;
+            std::map<uint32_t, Ptr<RdmaWorkloadApplication>> senders;
             uint32_t replayIndex = 0;
+            uint64_t backgroundRecords = 0;
             for (const LegacyFlowRecord& record : records) {
                 if (record.applicationId != 0) {
                     continue;
                 }
+                ++backgroundRecords;
                 auto source = topologyResult.physicalToEndpoint.find(record.source);
                 auto destination = topologyResult.physicalToEndpoint.find(record.destination);
                 if (source == topologyResult.physicalToEndpoint.end() || destination == topologyResult.physicalToEndpoint.end()) {
                     throw std::invalid_argument("legacy app_id=0 flow endpoint is not a host");
-                }
-                if (replayIndex >= 30000) {
-                    throw std::invalid_argument("too many legacy flows for unique RDMA source ports");
                 }
                 uint32_t sourceIndex = source->second;
                 uint32_t destinationIndex = destination->second;
@@ -1891,8 +1939,6 @@ namespace ns3 {
                     applications.Add(receiver);
                 }
 
-                Ptr<RdmaConsensusTransport> sendTransport = CreateObject<RdmaConsensusTransport>();
-                sendTransport->SetAttribute("PriorityGroup", UintegerValue(record.priorityGroup));
                 auto pair = std::make_pair(sourceIndex, destinationIndex);
                 uint64_t pairRtt = topologyResult.pairRttNs.count(pair) != 0 ? topologyResult.pairRttNs.at(pair) : topologyResult.maxRttNs;
                 uint64_t pairBdp =
@@ -1903,21 +1949,34 @@ namespace ns3 {
                 if (window == 0 && rdmaHasWindow) {
                     window = static_cast<uint32_t>(std::min<uint64_t>(selectedBdp, std::numeric_limits<uint32_t>::max()));
                 }
-                sendTransport->SetAttribute("Window", UintegerValue(window));
-                sendTransport->SetAttribute("BaseRttNs", UintegerValue(selectedRtt));
-                uint16_t localPort = static_cast<uint16_t>(30000 + replayIndex++);
-                sendTransport->SetLocalEndpoint(sourceId, InetSocketAddress(interfaces.GetAddress(sourceIndex), localPort));
+                ++replayIndex;
+                Ptr<RdmaConsensusTransport>& sendTransport = senderTransports[sourceIndex];
+                if (!sendTransport) {
+                    sendTransport = CreateObject<RdmaConsensusTransport>();
+                    sendTransport->SetAttribute("PriorityGroup", UintegerValue(record.priorityGroup));
+                    sendTransport->SetAttribute("Window", UintegerValue(window));
+                    sendTransport->SetAttribute("BaseRttNs", UintegerValue(selectedRtt));
+                    sendTransport->SetLocalEndpoint(sourceId, InetSocketAddress(interfaces.GetAddress(sourceIndex), 30000));
+                    Ptr<RdmaWorkloadApplication>& sender = senders[sourceIndex];
+                    sender = CreateObject<RdmaWorkloadApplication>();
+                    sender->SetNodeId(sourceId);
+                    sender->SetTransport(sendTransport);
+                    nodes.Get(sourceIndex)->AddApplication(sender);
+                    applications.Add(sender);
+                }
                 sendTransport->SetPeerAddress(destinationId,
                                               InetSocketAddress(interfaces.GetAddress(destinationIndex), record.destinationPort));
-                Ptr<RdmaWorkloadApplication> sender = CreateObject<RdmaWorkloadApplication>();
-                sender->SetNodeId(sourceId);
-                sender->SetTransport(sendTransport);
+                Ptr<RdmaWorkloadApplication> sender = senders[sourceIndex];
                 Time absoluteStart = NanoSeconds(record.startTimeNs);
                 sender->AddFlow({destinationId, static_cast<uint64_t>(1000000) + replayIndex, record.bytes,
-                                 absoluteStart > applicationStart ? absoluteStart - applicationStart : Seconds(0)});
-                nodes.Get(sourceIndex)->AddApplication(sender);
-                applications.Add(sender);
+                                 absoluteStart > applicationStart ? absoluteStart - applicationStart : Seconds(0),
+                                 static_cast<uint16_t>(record.priorityGroup)});
+                if ((backgroundRecords % 100000) == 0) {
+                    NS_LOG_UNCOND("RDMA background flows loaded: " << backgroundRecords << "/" << records.size());
+                }
             }
+            NS_LOG_UNCOND("RDMA background flow loading complete: " << backgroundRecords
+                                                                     << " flows; sender applications=" << senders.size());
         }
 
         return applications;
@@ -1977,9 +2036,14 @@ namespace ns3 {
             }
             m_bidlApplications.push_back(application);
             application->TraceConnectWithoutContext("MessageTx", MakeCallback(&ConsensusStatistics::OnMessage, this));
+            application->TraceConnectWithoutContext("MessageTx", MakeCallback(&ConsensusStatistics::OnBidlMessageTx, this));
+            application->TraceConnectWithoutContext("MessageRx", MakeCallback(&ConsensusStatistics::OnBidlMessageRx, this));
             application->TraceConnectWithoutContext("PhaseChanged", MakeCallback(&ConsensusStatistics::OnBidlPhase, this));
             application->TraceConnectWithoutContext("BatchCreated", MakeCallback(&ConsensusStatistics::OnBidlBatch, this));
             application->TraceConnectWithoutContext("BlockCommitted", MakeCallback(&ConsensusStatistics::OnBidlCommit, this));
+            application->TraceConnectWithoutContext("TransactionCommitted", MakeCallback(&ConsensusStatistics::OnBidlTransactionCommit, this));
+            application->TraceConnectWithoutContext("BlockCommitTime", MakeCallback(&ConsensusStatistics::OnBidlBlockCommitTime, this));
+            application->TraceConnectWithoutContext("ExecutionBacklog", MakeCallback(&ConsensusStatistics::OnExecutionBacklog, this));
             application->TraceConnectWithoutContext("ForgedTransaction", MakeCallback(&ConsensusStatistics::OnBidlForged, this));
             application->TraceConnectWithoutContext("ConflictRejected",
                                                     MakeCallback(&ConsensusStatistics::OnBidlConflictRejected, this));
@@ -2061,6 +2125,18 @@ namespace ns3 {
             total += client->GetCompletedTransactions();
         }
         if (total == 0) {
+            if (!m_committedBidlSequences.empty()) {
+                return m_committedBidlSequences.size();
+            }
+            // Direct BIDL ingress has no client application.  The sequencer's
+            // sequence-to-block map is the authoritative unique-transaction
+            // counter; executor-local block counters may count re-proposed
+            // ranges more than once after a view change.
+            for (const auto& application : m_bidlApplications) {
+                if (application->IsSequencer()) {
+                    return application->GetSequencerCommittedTransactions();
+                }
+            }
             for (const auto& application : m_bidlApplications) {
                 total = std::max(total, application->GetCommittedTransactions());
             }
@@ -2086,16 +2162,27 @@ namespace ns3 {
     }
 
     double ConsensusStatistics::GetTransactionThroughput() const {
-        Time duration = m_measurementStop - m_measurementStart;
-        if (!duration.IsZero() && GetCompletedRequests() != 0) {
-            double transactionsPerRequest = static_cast<double>(GetCompletedTransactions()) / GetCompletedRequests();
-            return transactionsPerRequest * GetMeasuredRequests() / duration.GetSeconds();
+        // For a finite workload, report completion throughput over the actual
+        // active interval: first transaction submission/batch to final commit.
+        // The measurement-window rate is still useful for offered-load
+        // experiments, but it includes idle time after the last completion.
+        Time duration = m_lastCompletion - m_firstSubmission;
+        if (!duration.IsZero() && duration.IsPositive()) {
+            return static_cast<double>(GetCompletedTransactions()) / duration.GetSeconds();
         }
         double total = 0.0;
         for (const auto& application : m_bidlApplications) {
             total = std::max(total, application->GetTransactionThroughput());
         }
         return total;
+    }
+
+    double ConsensusStatistics::GetWindowTransactionThroughput() const {
+        Time duration = m_measurementStop - m_measurementStart;
+        if (duration.IsZero()) {
+            return 0.0;
+        }
+        return static_cast<double>(GetCompletedTransactions()) / duration.GetSeconds();
     }
 
     double ConsensusStatistics::GetLatencyPercentile(double percentile) const {
@@ -2134,13 +2221,18 @@ namespace ns3 {
 
         std::ofstream summary(outputPrefix + "-summary.csv");
         std::ofstream latency(outputPrefix + "-latency.csv");
+        std::ofstream transactionLatency(outputPrefix + "-transaction-latency.csv");
+        std::ofstream transactionCommit(outputPrefix + "-transaction-commit.csv");
+        std::ofstream blockCommit(outputPrefix + "-block-commit.csv");
+        std::ofstream backlog(outputPrefix + "-executor-backlog.csv");
+        std::ofstream bidlPath(outputPrefix + "-transaction-path.csv");
         std::ofstream phases(outputPrefix + "-phases.csv");
         std::ofstream messages(outputPrefix + "-messages.csv");
         std::ofstream network(outputPrefix + "-network.csv");
         std::ofstream queues(outputPrefix + "-queues.csv");
         std::ofstream background(outputPrefix + "-background.csv");
         std::ofstream switches(outputPrefix + "-switches.csv");
-        if (!summary || !latency || !phases || !messages || !network || !queues || !background || !switches) {
+        if (!summary || !latency || !transactionLatency || !transactionCommit || !blockCommit || !backlog || !bidlPath || !phases || !messages || !network || !queues || !background || !switches) {
             throw std::runtime_error("cannot write consensus result files");
         }
 
@@ -2169,15 +2261,24 @@ namespace ns3 {
             return reexecutionLatency[std::min(index, reexecutionLatency.size() - 1)];
         };
 
+        uint64_t sequencedTransactions = 0;
+        for (const auto& application : m_bidlApplications) {
+            sequencedTransactions = std::max(sequencedTransactions, application->GetSequencedTransactions());
+        }
+
         summary << "metric,value,unit\n"
                 << "submitted_requests," << m_submittedRequests << ",requests\n"
                 << "completed_requests," << GetCompletedRequests() << ",requests\n"
                 << "measured_requests," << GetMeasuredRequests() << ",requests\n"
                 << "measurement_start," << m_measurementStart.GetSeconds() << ",seconds\n"
                 << "measurement_stop," << m_measurementStop.GetSeconds() << ",seconds\n"
+                << "completion_start," << m_firstSubmission.GetSeconds() << ",seconds\n"
+                << "completion_end," << m_lastCompletion.GetSeconds() << ",seconds\n"
+                << "completion_interval," << (m_lastCompletion - m_firstSubmission).GetSeconds() << ",seconds\n"
                 << "completed_transactions," << GetCompletedTransactions() << ",transactions\n"
                 << "request_throughput," << GetRequestThroughput() << ",requests_per_second\n"
                 << "transaction_throughput," << GetTransactionThroughput() << ",transactions_per_second\n"
+                << "window_transaction_throughput," << GetWindowTransactionThroughput() << ",transactions_per_second\n"
                 << "latency_p50," << GetLatencyPercentile(50) << ",microseconds\n"
                 << "latency_p95," << GetLatencyPercentile(95) << ",microseconds\n"
                 << "latency_p99," << GetLatencyPercentile(99) << ",microseconds\n"
@@ -2204,7 +2305,7 @@ namespace ns3 {
                 << "view_changes," << GetViewChanges() << ",views\n"
                 << "replica_view_transitions," << m_viewChanges << ",events\n"
                 << "bidl_blocks," << m_bidlBlocks << ",blocks\n"
-                << "submitted_transactions," << m_bidlTransactions << ",transactions\n"
+                << "submitted_transactions," << sequencedTransactions << ",transactions\n"
                 << "bidl_forged_transactions," << m_bidlForgedTransactions << ",transactions\n"
                 << "bidl_forged_messages," << m_bidlForgedMessages << ",messages\n"
                 << "bidl_forged_bytes," << m_bidlForgedBytes << ",bytes\n"
@@ -2229,6 +2330,29 @@ namespace ns3 {
         latency << "client_id,request_id,latency_us\n";
         for (const auto& sample : m_requestSamples) {
             latency << sample.clientId << ',' << sample.requestId << ',' << sample.latency.GetMicroSeconds() << '\n';
+        }
+
+        transactionLatency << "sequence_number,commit_latency_us\n";
+        for (const auto& [sequence, value] : m_bidlTransactionLatencies) {
+            transactionLatency << sequence << ',' << value.GetMicroSeconds() << '\n';
+        }
+        transactionCommit << "sequence_number,commit_time_us,commit_latency_us\n";
+        for (const auto& [sequence, value] : m_bidlTransactionCommitSamples) {
+            transactionCommit << sequence << ',' << value.commitTime.GetMicroSeconds() << ',' << value.latency.GetMicroSeconds() << '\n';
+        }
+        blockCommit << "block_id,transaction_count,commit_time_us,commit_latency_us,node_id\n";
+        for (const auto& [blockId, sample] : m_bidlBlockCommitSamples) {
+            blockCommit << blockId << ',' << sample.transactions << ',' << sample.commitTime.GetMicroSeconds() << ',' << sample.latency.GetMicroSeconds() << ',' << sample.nodeId << '\n';
+        }
+        backlog << "time_us,node_id,verification_backlog,execution_backlog,total_backlog\n";
+        for (const auto& sample : m_backlogSamples) {
+            backlog << sample.time.GetMicroSeconds() << ',' << sample.nodeId << ',' << sample.verification << ','
+                    << sample.execution << ',' << sample.total << '\n';
+        }
+        bidlPath << "direction,sender_id,receiver_id,message_type,sequence_number,bytes,time_us\n";
+        for (const auto& sample : m_bidlPathSamples) {
+            bidlPath << sample.direction << ',' << sample.senderId << ',' << sample.receiverId << ',' << sample.type << ','
+                     << sample.sequence << ',' << sample.bytes << ',' << sample.time.GetMicroSeconds() << '\n';
         }
 
         phases << "protocol,node_id,instance_id,phase,elapsed_us\n";
@@ -2368,9 +2492,6 @@ namespace ns3 {
     }
 
     void ConsensusStatistics::OnBidlBatch(uint32_t nodeId, uint64_t blockId, uint32_t transactions) {
-        if (!IsMeasuring()) {
-            return;
-        }
         (void)nodeId;
         (void)blockId;
         ++m_bidlBlocks;
@@ -2381,15 +2502,41 @@ namespace ns3 {
         }
     }
 
-    void ConsensusStatistics::OnBidlCommit(uint32_t nodeId, uint64_t blockId, Time latency) {
-        if (!IsMeasuring()) {
-            return;
-        }
+    void ConsensusStatistics::OnBidlCommit(uint32_t nodeId, uint64_t blockId, uint32_t transactions, Time latency) {
         (void)nodeId;
-        if (m_committedBidlBlocks.insert(blockId).second && m_clients.empty()) {
+        for (uint64_t sequence = blockId; sequence < blockId + transactions; ++sequence) {
+            m_committedBidlSequences.insert(sequence);
+        }
+        if (m_committedBidlBlocks.insert(blockId).second && m_clients.empty() && IsMeasuring()) {
             m_requestSamples.push_back({nodeId, blockId, latency});
         }
         m_lastCompletion = Simulator::Now();
+    }
+
+    void ConsensusStatistics::OnBidlTransactionCommit(uint32_t nodeId, uint64_t sequence, Time latency) {
+        (void)nodeId;
+        m_bidlTransactionLatencies.emplace(sequence, latency);
+        m_bidlTransactionCommitSamples.emplace(sequence, BidlTransactionCommitSample{Simulator::Now(), latency});
+    }
+
+    void ConsensusStatistics::OnBidlBlockCommitTime(uint32_t nodeId, uint64_t blockId, uint32_t transactions, Time commitTime, Time latency) {
+        m_bidlBlockCommitSamples.emplace(blockId, BidlBlockCommitSample{nodeId, blockId, transactions, commitTime, latency});
+    }
+
+    void ConsensusStatistics::OnExecutionBacklog(uint32_t nodeId, uint32_t verification, uint32_t execution, uint32_t total) {
+        m_backlogSamples.push_back({nodeId, Simulator::Now(), verification, execution, total});
+    }
+
+    void ConsensusStatistics::OnBidlMessageTx(uint32_t senderId, uint32_t receiverId, uint16_t type, uint64_t instanceId, uint32_t bytes) {
+        if (type == static_cast<uint16_t>(ConsensusMessageType::BIDL_TRANSACTION)) {
+            m_bidlPathSamples.push_back({"tx", senderId, receiverId, type, instanceId, bytes, Simulator::Now()});
+        }
+    }
+
+    void ConsensusStatistics::OnBidlMessageRx(uint32_t senderId, uint32_t receiverId, uint16_t type, uint64_t instanceId, uint32_t bytes) {
+        if (type == static_cast<uint16_t>(ConsensusMessageType::BIDL_TRANSACTION)) {
+            m_bidlPathSamples.push_back({"rx", senderId, receiverId, type, instanceId, bytes, Simulator::Now()});
+        }
     }
 
     void ConsensusStatistics::OnBidlForged(uint32_t nodeId, uint64_t sequence, uint32_t messages, uint64_t bytes) {

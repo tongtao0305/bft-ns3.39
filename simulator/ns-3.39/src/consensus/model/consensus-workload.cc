@@ -33,7 +33,8 @@ namespace ns3 {
         return tid;
     }
 
-    RdmaWorkloadApplication::RdmaWorkloadApplication() : m_nodeId(0), m_nextMessageId(1), m_running(false) {}
+    RdmaWorkloadApplication::RdmaWorkloadApplication()
+        : m_nodeId(0), m_nextMessageId(1), m_nextFlowIndex(0), m_running(false) {}
 
     void RdmaWorkloadApplication::SetNodeId(uint32_t nodeId) {
         m_nodeId = nodeId;
@@ -57,21 +58,36 @@ namespace ns3 {
         m_transport->SetReceiveCallback(MakeCallback(&RdmaWorkloadApplication::ReceiveFlow, this));
         m_transport->Start(GetNode());
         m_running = true;
-        for (const RdmaWorkloadFlow& flow : m_flows) {
-            m_events.push_back(Simulator::Schedule(flow.offset, &RdmaWorkloadApplication::SendFlow, this, flow));
+        std::sort(m_flows.begin(), m_flows.end(), [](const RdmaWorkloadFlow& left, const RdmaWorkloadFlow& right) {
+            return left.offset < right.offset;
+        });
+        m_nextFlowIndex = 0;
+        if (!m_flows.empty()) {
+            m_nextEvent = Simulator::Schedule(m_flows.front().offset, &RdmaWorkloadApplication::DispatchNextFlow, this);
         }
     }
 
     void RdmaWorkloadApplication::StopApplication() {
         m_running = false;
-        for (EventId& event : m_events) {
-            if (event.IsRunning()) {
-                Simulator::Cancel(event);
-            }
+        if (m_nextEvent.IsRunning()) {
+            Simulator::Cancel(m_nextEvent);
         }
-        m_events.clear();
         if (m_transport) {
             m_transport->Stop();
+        }
+    }
+
+    void RdmaWorkloadApplication::DispatchNextFlow() {
+        if (!m_running || m_nextFlowIndex >= m_flows.size()) {
+            return;
+        }
+        SendFlow(m_flows[m_nextFlowIndex++]);
+        if (m_nextFlowIndex < m_flows.size()) {
+            Time delay = m_flows[m_nextFlowIndex].offset - Simulator::Now();
+            if (delay.IsNegative()) {
+                delay = Seconds(0);
+            }
+            m_nextEvent = Simulator::Schedule(delay, &RdmaWorkloadApplication::DispatchNextFlow, this);
         }
     }
 
@@ -93,6 +109,7 @@ namespace ns3 {
         m_flowStartedTrace(m_nodeId, flow.peerId, flow.flowId, flow.bytes);
         ConsensusTransportMetadata metadata = ConsensusTransportMetadata::FromMessage(message);
         metadata.flowId = flow.flowId;
+        metadata.priorityGroup = flow.priorityGroup;
         m_transport->Send(flow.peerId, message.ToPacket(), metadata);
     }
 

@@ -71,6 +71,12 @@ namespace ns3 {
                 .AddTraceSource("BlockCommitted", "An executor commits a block after 2f+1 persists.",
                                 MakeTraceSourceAccessor(&BidlApplication::m_blockCommittedTrace),
                                 "ns3::BidlApplication::CommitTracedCallback")
+                .AddTraceSource("TransactionCommitted", "A sequence-numbered transaction commits with sequencer-to-commit latency.",
+                                MakeTraceSourceAccessor(&BidlApplication::m_transactionCommittedTrace),
+                                "ns3::BidlApplication::TransactionCommitTracedCallback")
+                .AddTraceSource("BlockCommitTime", "An executor commits a block with its absolute simulation time.",
+                                MakeTraceSourceAccessor(&BidlApplication::m_blockCommitTimeTrace),
+                                "ns3::BidlApplication::BlockCommitTimeTracedCallback")
                 .AddTraceSource("MessageTx", "A BIDL message is passed to the transport.",
                                 MakeTraceSourceAccessor(&BidlApplication::m_messageTxTrace), "ns3::BidlApplication::MessageTracedCallback")
                 .AddTraceSource("MessageRx", "A complete BIDL message is received.",
@@ -85,7 +91,10 @@ namespace ns3 {
                                 "ns3::BidlApplication::ConflictTracedCallback")
                 .AddTraceSource("BlockReexecution", "An executor completes whole-block reexecution after a consensus mismatch.",
                                 MakeTraceSourceAccessor(&BidlApplication::m_blockReexecutionTrace),
-                                "ns3::BidlApplication::ReexecutionTracedCallback");
+                                "ns3::BidlApplication::ReexecutionTracedCallback")
+                .AddTraceSource("ExecutionBacklog", "Periodic executor verification and execution backlog sample.",
+                                MakeTraceSourceAccessor(&BidlApplication::m_executionBacklogTrace),
+                                "ns3::BidlApplication::ExecutionBacklogTracedCallback");
         return tid;
     }
 
@@ -145,6 +154,18 @@ namespace ns3 {
         return m_committedTransactions;
     }
 
+    uint64_t BidlApplication::GetSequencedTransactions() const {
+        return m_role == BIDL_SEQUENCER ? m_transactions.size() : 0;
+    }
+
+    uint64_t BidlApplication::GetSequencerCommittedTransactions() const {
+        return m_role == BIDL_SEQUENCER ? m_committedTransactionBlocks.size() : 0;
+    }
+
+    bool BidlApplication::IsSequencer() const {
+        return m_role == BIDL_SEQUENCER;
+    }
+
     double BidlApplication::GetTransactionThroughput() const {
         Time duration = m_lastCommit - m_firstCommitWindowStart;
         return !m_hasCommitWindow || duration.IsZero() ? 0.0 : static_cast<double>(m_committedTransactions) / duration.GetSeconds();
@@ -181,6 +202,9 @@ namespace ns3 {
             m_engine->SetDecisionCallback(MakeCallback(&BidlApplication::OnEngineDecision, this));
             m_engine->Start();
         }
+        if (m_role == BIDL_EXECUTOR) {
+            m_backlogEvent = Simulator::Schedule(MilliSeconds(10), &BidlApplication::SampleExecutionBacklog, this);
+        }
     }
 
     void BidlApplication::StopApplication() {
@@ -188,12 +212,25 @@ namespace ns3 {
         if (m_batchEvent.IsRunning()) {
             Simulator::Cancel(m_batchEvent);
         }
+        if (m_backlogEvent.IsRunning()) {
+            Simulator::Cancel(m_backlogEvent);
+        }
         if (m_engine) {
             m_engine->Stop();
         }
         if (m_transport) {
             m_transport->Stop();
         }
+    }
+
+    void BidlApplication::SampleExecutionBacklog() {
+        if (!m_running || m_role != BIDL_EXECUTOR) {
+            return;
+        }
+        uint32_t executionBacklog = static_cast<uint32_t>(m_transactions.size() - m_executedTransactions.size());
+        uint32_t verificationBacklog = static_cast<uint32_t>(m_verificationPending.size());
+        m_executionBacklogTrace(m_nodeId, verificationBacklog, executionBacklog, verificationBacklog + executionBacklog);
+        m_backlogEvent = Simulator::Schedule(MilliSeconds(10), &BidlApplication::SampleExecutionBacklog, this);
     }
 
     void BidlApplication::InjectTransaction(uint32_t payloadSize, uint32_t transactionCount, uint64_t requestId) {
@@ -857,7 +894,13 @@ namespace ns3 {
         ++m_committedBlocks;
         m_committedTransactions += block.transactionCount;
         m_lastCommit = Simulator::Now();
-        m_blockCommittedTrace(m_nodeId, block.blockId, m_lastCommit - block.firstSeen);
+        m_blockCommittedTrace(m_nodeId, block.blockId, block.transactionCount, m_lastCommit - block.firstSeen);
+        m_blockCommitTimeTrace(m_nodeId, block.blockId, block.transactionCount, m_lastCommit, m_lastCommit - block.firstSeen);
+        for (uint64_t sequence = block.blockId; sequence < block.blockId + block.transactionCount; ++sequence) {
+            auto arrival = m_transactionArrivalTimes.find(sequence);
+            Time start = arrival == m_transactionArrivalTimes.end() ? block.firstSeen : arrival->second;
+            m_transactionCommittedTrace(m_nodeId, sequence, m_lastCommit - start);
+        }
         m_phaseChangedTrace(m_nodeId, block.blockId, BIDL_BLOCK_COMMITTED, m_lastCommit - block.firstSeen);
         m_phaseChangedTrace(m_nodeId, block.blockId, BIDL_P5_COMMIT, m_lastCommit - block.storageCompletedAt);
         m_phaseChangedTrace(m_nodeId, block.blockId, BIDL_END_TO_END, m_lastCommit - block.firstSeen);

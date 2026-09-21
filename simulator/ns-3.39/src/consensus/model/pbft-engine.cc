@@ -26,6 +26,14 @@ namespace ns3 {
                               MakeUintegerAccessor(&PbftEngine::m_controlPayloadBytes), MakeUintegerChecker<uint32_t>())
                 .AddAttribute("MessageProcessingTime", "CPU service time before processing a replica message.", TimeValue(MicroSeconds(5)),
                               MakeTimeAccessor(&PbftEngine::m_messageProcessingTime), MakeTimeChecker())
+                .AddAttribute("PrePrepareProcessingTime", "CPU service time for PRE-PREPARE messages.", TimeValue(MicroSeconds(8)),
+                              MakeTimeAccessor(&PbftEngine::m_prePrepareProcessingTime), MakeTimeChecker())
+                .AddAttribute("PrepareProcessingTime", "CPU service time for PREPARE messages.", TimeValue(MicroSeconds(6)),
+                              MakeTimeAccessor(&PbftEngine::m_prepareProcessingTime), MakeTimeChecker())
+                .AddAttribute("CommitProcessingTime", "CPU service time for COMMIT messages.", TimeValue(MicroSeconds(6)),
+                              MakeTimeAccessor(&PbftEngine::m_commitProcessingTime), MakeTimeChecker())
+                .AddAttribute("ViewChangeProcessingTime", "CPU service time for VIEW_CHANGE and NEW_VIEW messages.", TimeValue(MicroSeconds(10)),
+                              MakeTimeAccessor(&PbftEngine::m_viewChangeProcessingTime), MakeTimeChecker())
                 .AddAttribute("RetransmissionTimeout", "Time between retransmissions of the current PBFT phase.",
                               TimeValue(MilliSeconds(2)), MakeTimeAccessor(&PbftEngine::m_retransmissionTimeout), MakeTimeChecker())
                 .AddAttribute("InstanceTimeout", "Time before an unresolved instance initiates view change.", TimeValue(MilliSeconds(20)),
@@ -41,6 +49,8 @@ namespace ns3 {
 
     PbftEngine::PbftEngine()
         : m_primaryId(0), m_faultTolerance(1), m_controlPayloadBytes(64), m_messageProcessingTime(MicroSeconds(5)),
+          m_prePrepareProcessingTime(MicroSeconds(8)), m_prepareProcessingTime(MicroSeconds(6)),
+          m_commitProcessingTime(MicroSeconds(6)), m_viewChangeProcessingTime(MicroSeconds(10)),
           m_retransmissionTimeout(MilliSeconds(2)), m_instanceTimeout(MilliSeconds(20)), m_maxRetransmissions(3), m_view(0),
           m_nextSequence(1), m_nextMessageId(1), m_decidedCount(0), m_running(false) {}
 
@@ -126,9 +136,20 @@ namespace ns3 {
 
         Callback<void> process = MakeCallback(&PbftEngine::ProcessMessage, this).Bind(message);
         if (m_resourceModel) {
-            m_resourceModel->SubmitCpuTask(m_messageProcessingTime, process);
+            m_resourceModel->SubmitCpuTask(GetMessageProcessingTime(message), process);
         } else {
             Simulator::ScheduleNow(process);
+        }
+    }
+
+    Time PbftEngine::GetMessageProcessingTime(const ConsensusMessage& message) const {
+        switch (message.type) {
+        case ConsensusMessageType::PRE_PREPARE: return m_prePrepareProcessingTime;
+        case ConsensusMessageType::PREPARE: return m_prepareProcessingTime;
+        case ConsensusMessageType::COMMIT: return m_commitProcessingTime;
+        case ConsensusMessageType::VIEW_CHANGE:
+        case ConsensusMessageType::NEW_VIEW: return m_viewChangeProcessingTime;
+        default: return m_messageProcessingTime;
         }
     }
 

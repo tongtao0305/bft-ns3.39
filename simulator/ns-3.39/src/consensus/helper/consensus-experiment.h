@@ -255,6 +255,7 @@ namespace ns3 {
         uint32_t rdmaIncastFlowBytes{256 * 1024};
         double rdmaIncastStartMs{10.0};
         double rdmaIncastIntervalUs{1000.0};
+        double rdmaConstantRateGbps{0.0};
         double ecnPmax{0.2};
         double messageDropProbability{0.0};
         double messageDelayUs{0.0};
@@ -268,11 +269,15 @@ namespace ns3 {
         double requestRate{1000.0};
         double requestTimeoutMs{500.0};
         double retransmissionTimeoutMs{50.0};
-        double viewChangeTimeoutMs{200.0};
+        double viewChangeTimeoutMs{3000.0};
         double batchTimeoutMs{5.0};
         double sequencerServiceUs{20.0};
         double transactionVerificationUs{10.0};
         double pbftMessageProcessingUs{5.0};
+        double pbftPrePrepareProcessingUs{8.0};
+        double pbftPrepareProcessingUs{6.0};
+        double pbftCommitProcessingUs{6.0};
+        double pbftViewChangeProcessingUs{10.0};
         double executionTimePerTransactionUs{15.0};
         double approvalTimePerBlockUs{100.0};
         double storageTimePerBlockUs{500.0};
@@ -351,6 +356,7 @@ namespace ns3 {
         uint64_t GetViewChanges() const;
         double GetRequestThroughput() const;
         double GetTransactionThroughput() const;
+        double GetWindowTransactionThroughput() const;
         double GetLatencyPercentile(double percentile) const;
         double GetPhaseLatencyPercentile(const std::string& protocol, uint16_t phase, double percentile) const;
 
@@ -407,13 +413,18 @@ namespace ns3 {
         void OnRequestRetransmitted(uint32_t clientId, uint64_t requestId, uint32_t targetId);
         void OnRequestTimedOut(uint32_t clientId, uint64_t requestId);
         void OnMessage(uint32_t senderId, uint32_t receiverId, uint16_t type, uint64_t instanceId, uint32_t bytes);
+        void OnBidlMessageTx(uint32_t senderId, uint32_t receiverId, uint16_t type, uint64_t instanceId, uint32_t bytes);
+        void OnBidlMessageRx(uint32_t senderId, uint32_t receiverId, uint16_t type, uint64_t instanceId, uint32_t bytes);
         void OnDecision(uint32_t replicaId, uint64_t instanceId, uint64_t digest, Time time);
         void OnViewChanged(uint32_t replicaId, uint64_t view, uint32_t primaryId);
         void OnPbftPhase(uint32_t replicaId, uint64_t instanceId, uint16_t phase, Time elapsed);
         void OnEnginePhase(uint32_t replicaId, uint8_t protocol, uint64_t instanceId, uint16_t phase, Time elapsed);
         void OnBidlPhase(uint32_t nodeId, uint64_t blockId, uint16_t phase, Time elapsed);
         void OnBidlBatch(uint32_t nodeId, uint64_t blockId, uint32_t transactions);
-        void OnBidlCommit(uint32_t nodeId, uint64_t blockId, Time latency);
+        void OnBidlCommit(uint32_t nodeId, uint64_t blockId, uint32_t transactions, Time latency);
+        void OnBidlTransactionCommit(uint32_t nodeId, uint64_t sequence, Time latency);
+        void OnBidlBlockCommitTime(uint32_t nodeId, uint64_t blockId, uint32_t transactions, Time commitTime, Time latency);
+        void OnExecutionBacklog(uint32_t nodeId, uint32_t verification, uint32_t execution, uint32_t total);
         void OnBidlForged(uint32_t nodeId, uint64_t sequence, uint32_t messages, uint64_t bytes);
         void OnBidlConflictRejected(uint32_t nodeId, uint64_t sequence, uint32_t senderId);
         void OnBidlReexecution(uint32_t nodeId, uint64_t blockId, uint32_t transactions, Time latency);
@@ -437,6 +448,10 @@ namespace ns3 {
         std::vector<RequestSample> m_requestSamples;
         std::vector<PhaseSample> m_phaseSamples;
         std::vector<BackgroundFlowSample> m_backgroundFlows;
+        struct BacklogSample { uint32_t nodeId; Time time; uint32_t verification; uint32_t execution; uint32_t total; };
+        std::vector<BacklogSample> m_backlogSamples;
+        struct BidlPathSample { const char* direction; uint32_t senderId; uint32_t receiverId; uint16_t type; uint64_t sequence; uint32_t bytes; Time time; };
+        std::vector<BidlPathSample> m_bidlPathSamples;
         std::vector<DeviceStats> m_devices;
         std::vector<QueueStats> m_queues;
         std::vector<Ptr<ConsensusSwitchPolicy>> m_switchPolicies;
@@ -461,6 +476,12 @@ namespace ns3 {
         std::vector<Time> m_bidlReexecutionLatencies;
         std::set<uint64_t> m_views;
         std::set<uint64_t> m_committedBidlBlocks;
+        std::set<uint64_t> m_committedBidlSequences;
+        std::map<uint64_t, Time> m_bidlTransactionLatencies;
+        struct BidlTransactionCommitSample { Time commitTime; Time latency; };
+        std::map<uint64_t, BidlTransactionCommitSample> m_bidlTransactionCommitSamples;
+        struct BidlBlockCommitSample { uint32_t nodeId; uint64_t blockId; uint32_t transactions; Time commitTime; Time latency; };
+        std::map<uint64_t, BidlBlockCommitSample> m_bidlBlockCommitSamples;
         Time m_firstSubmission;
         Time m_lastCompletion;
         Time m_measurementStart;
