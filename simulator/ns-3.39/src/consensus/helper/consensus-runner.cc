@@ -344,8 +344,11 @@ namespace ns3 {
     }
 
     ConsensusRunResult ConsensusRunner::RunBidl(const ConsensusExperimentConfig& config, bool writeResults) const {
+        // 计算终端节点数量
         const uint32_t networkClients = config.bidlIngressMode == "network" ? config.GetEffectiveClientCount() : 0;
         const uint32_t maliciousNodes = config.GetEffectiveBidlMaliciousNodeCount();
+
+        // 创建拓扑
         ConsensusTopology topology = config.BuildTopology(2 * config.replicaCount + 1 + networkClients + maliciousNodes);
         ConsensusRolePlacement placement = config.ResolveBidlPlacement(topology);
         const uint16_t port = config.GetConsensusPort(9100);
@@ -354,6 +357,7 @@ namespace ns3 {
         constexpr uint32_t firstMaliciousId = 300;
         constexpr uint32_t firstClientId = 1000;
 
+        // 建立逻辑 ID 到网络 endpoint 的映射
         std::vector<uint32_t> ordererIds;
         std::vector<uint32_t> executorIds;
         for (uint32_t index = 0; index < config.replicaCount; ++index) {
@@ -384,11 +388,13 @@ namespace ns3 {
             endpoints.emplace(firstClientId + client, InetSocketAddress(topology.nodeAddresses[physicalId], port));
         }
 
+        // 将配置字段写入对象工厂
         ConsensusHelper helper;
         config.ConfigureHelper(helper, &topology);
         helper.SetClientAttribute("ReplyQuorum", UintegerValue(1));
         helper.SetResourceAttribute("Mode", EnumValue(RESOURCE_QUEUED));
 
+        // 实例化并连接每一种应用
         ApplicationContainer applications;
         for (uint32_t index = 0; index < config.replicaCount; ++index) {
             applications.Add(helper.InstallBidlNode(topology.nodes.Get(placement.ordererPhysicalIds[index]), ordererIds[index],

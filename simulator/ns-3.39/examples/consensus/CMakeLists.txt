@@ -1,6 +1,6 @@
-build_lib_example(
-  NAME consensus-example
-  SOURCE_FILES consensus-example.cc
+build_example(
+  NAME bidl-experiment
+  SOURCE_FILES bidl-experiment.cc
   LIBRARIES_TO_LINK
     ${libconsensus}
     ${libcsma}
