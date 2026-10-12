@@ -35,7 +35,7 @@ python3 --version
 ```bash
 cd "$BFT_REPO/simulator/ns-3.39"
 ./configure.sh
-./ns3 build consensus-example
+./ns3 build bidl-experiment
 ```
 
 也可以执行 `./waf` 完成构建；在本仓库中它会转到当前的 ns-3/CMake 构建流程。建议日常使用 `./ns3`，因为可以明确指定目标。
@@ -44,10 +44,10 @@ cd "$BFT_REPO/simulator/ns-3.39"
 
 ```bash
 ./ns3 show targets | grep consensus
-./ns3 run "consensus-example --help"
+./ns3 run "bidl-experiment --help"
 ```
 
-不要在脚本里写死 `build/.../ns3.39-consensus-example-default`。本仓库默认是 optimized 构建，实际文件名为 `ns3.39-consensus-example-optimized`。`./ns3 run` 会自动找到正确的二进制文件，因此后文都使用这种写法。
+不要在脚本里写死 `build/.../ns3.39-bidl-experiment-default`。本仓库默认是 optimized 构建，实际文件名为 `ns3.39-bidl-experiment-optimized`。`./ns3 run` 会自动找到正确的二进制文件，因此后文都使用这种写法。
 
 本文的共识程序本身不依赖 Python bindings。如果 `./configure.sh` 只因 bindings 依赖缺失而失败，可以改用以下最小 C++ 配置：
 
@@ -59,7 +59,7 @@ CXXFLAGS=-w ./ns3 configure \
   --disable-python-bindings \
   --disable-werror \
   --disable-warnings
-./ns3 build consensus-example
+./ns3 build bidl-experiment
 ```
 
 ### 可选：启用测试
@@ -74,7 +74,7 @@ CXXFLAGS=-w ./ns3 configure \
   --enable-python-bindings \
   --disable-werror \
   --disable-warnings
-./ns3 build consensus-example test-runner
+./ns3 build bidl-experiment test-runner
 ./ns3 run "test-runner --suite=consensus --verbose"
 ./ns3 run "test-runner --suite=consensus-e2e --verbose"
 ```
@@ -90,7 +90,7 @@ mkdir -p results/manual
 ### 3.1 PBFT over RDMA
 
 ```bash
-./ns3 run "consensus-example \
+./ns3 run "bidl-experiment \
   --preset=pbft-rdma \
   --requestCount=20 \
   --simulationTime=2 \
@@ -106,7 +106,7 @@ completed=20 transactions=20 blocks=0 ... output=results/manual/pbft-smoke-*.csv
 ### 3.2 BIDL over RDMA
 
 ```bash
-./ns3 run "consensus-example \
+./ns3 run "bidl-experiment \
   --preset=bidl-rdma \
   --requestCount=20 \
   --batchSize=10 \
@@ -132,8 +132,8 @@ completed=20 transactions=20 blocks=0 ... output=results/manual/pbft-smoke-*.csv
 仓库自带一个小型 PBFT/RDMA 配置：
 
 ```bash
-./ns3 run "consensus-example \
-  --configFile=src/consensus/examples/consensus-experiment.conf \
+./ns3 run "bidl-experiment \
+  --configFile=examples/consensus/configs/baseline/consensus-experiment.conf \
   --outputPrefix=results/manual/pbft-config"
 ```
 
@@ -144,8 +144,8 @@ completed=20 transactions=20 blocks=0 ... output=results/manual/pbft-smoke-*.csv
 该拓扑包含 16 台主机、8 台 edge、8 台 aggregation 和 4 台 core 交换机：
 
 ```bash
-./ns3 run "consensus-example \
-  --configFile=src/consensus/examples/bidl-k4-fat-tree.conf \
+./ns3 run "bidl-experiment \
+  --configFile=examples/consensus/configs/baseline/bidl-k4-fat-tree.conf \
   --requestCount=2000 \
   --outputPrefix=results/manual/bidl-k4-baseline"
 ```
@@ -153,8 +153,8 @@ completed=20 transactions=20 blocks=0 ... output=results/manual/pbft-smoke-*.csv
 在相同拓扑上启用恶意广播者：
 
 ```bash
-./ns3 run "consensus-example \
-  --configFile=src/consensus/examples/bidl-k4-fat-tree.conf \
+./ns3 run "bidl-experiment \
+  --configFile=examples/consensus/configs/baseline/bidl-k4-fat-tree.conf \
   --requestCount=2000 \
   --bidlAttackEnabled=true \
   --outputPrefix=results/manual/bidl-k4-attack"
@@ -167,17 +167,17 @@ completed=20 transactions=20 blocks=0 ... output=results/manual/pbft-smoke-*.csv
 下面的配置让正常路径和 RDMA 背景流共享瓶颈，而伪造流量走旁路：
 
 ```bash
-./ns3 run "consensus-example \
-  --configFile=src/consensus/examples/bidl-attacker-bypass.conf \
+./ns3 run "bidl-experiment \
+  --configFile=examples/consensus/configs/baseline/bidl-attacker-bypass.conf \
   --outputPrefix=results/manual/bidl-bypass-with-background"
 ```
 
 配置中的 `flowFile` 默认启用背景流。做对照实验时，复制配置文件、删除复制件中的 `flowFile=...` 一行，再使用复制件运行。不要直接修改原始配置，这样更容易复现实验和检查差异。例如：
 
 ```bash
-cp src/consensus/examples/bidl-attacker-bypass.conf /tmp/bidl-bypass-no-bg.conf
+cp examples/consensus/configs/baseline/bidl-attacker-bypass.conf /tmp/bidl-bypass-no-bg.conf
 sed -i '/^flowFile=/d' /tmp/bidl-bypass-no-bg.conf
-./ns3 run "consensus-example \
+./ns3 run "bidl-experiment \
   --configFile=/tmp/bidl-bypass-no-bg.conf \
   --outputPrefix=results/manual/bidl-bypass-no-background"
 ```
@@ -189,7 +189,7 @@ sed -i '/^flowFile=/d' /tmp/bidl-bypass-no-bg.conf
 论文式结果不应只使用单个随机 run。下面从 run 1 开始连续执行 5 次：
 
 ```bash
-./ns3 run "consensus-example \
+./ns3 run "bidl-experiment \
   --preset=bidl-rdma \
   --requestCount=2000 \
   --warmupTime=0.2 \
@@ -275,14 +275,14 @@ BIDL 的外部请求会在流水线中被批处理，因此 `submitted_requests`
 完整参数列表以当前代码为准：
 
 ```bash
-./ns3 run "consensus-example --help"
+./ns3 run "bidl-experiment --help"
 ```
 
 ## 8. 常见问题
 
 ### 找不到 `*-default` 二进制
 
-当前配置是 optimized profile，直接使用 `./ns3 run "consensus-example ..."`，或者查看 `build/src/consensus/examples/` 中的实际文件名。
+当前配置是 optimized profile，直接使用 `./ns3 run "bidl-experiment ..."`，或者查看 `build/examples/consensus/` 中的实际文件名。
 
 ### 找不到 topology/flow 文件
 
@@ -297,8 +297,8 @@ BIDL 的外部请求会在流水线中被批处理，因此 `submitted_requests`
 先显式重编译再运行：
 
 ```bash
-./ns3 build consensus-example
-./ns3 run "consensus-example --configFile=... --outputPrefix=..."
+./ns3 build bidl-experiment
+./ns3 run "bidl-experiment --configFile=... --outputPrefix=..."
 ```
 
 不要复用已有的输出前缀，以免新旧文件混淆。
@@ -312,7 +312,7 @@ BIDL 的外部请求会在流水线中被批处理，因此 `submitted_requests`
 ```text
 安装依赖
   → ./configure.sh
-  → ./ns3 build consensus-example
+  → ./ns3 build bidl-experiment
   → 跑 PBFT/BIDL smoke test
   → 检查 manifest.status 和 summary.csv
   → 固化 .conf 配置

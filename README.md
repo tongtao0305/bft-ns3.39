@@ -1,5 +1,37 @@
-
 # ns3-datacenter
+
+## BIDL 实验资产
+
+可复用的共识实现位于 `simulator/ns-3.39/src/consensus/`；可执行的 BFT 实验入口、配置与资产集中在 `simulator/ns-3.39/examples/consensus/`：
+
+- `configs/`：实验配置。
+- `topologies/`：网络拓扑。
+- `workloads/hadoop/`：Hadoop 背景流量。
+- `workloads/flows/`：小型 BIDL、sequencer 和 legacy 流量。
+- `bidl-experiment.cc`：由 CMake 构建的 PBFT/BIDL 实验入口。
+- `scripts/local/`、`scripts/slurm/`：本地和 Slurm 实验启动器。
+
+### 拓扑
+
+| 分组 | 文件 |
+| --- | --- |
+| BIDL 攻击与 legacy | `bidl-attacker-bypass-qbb-topology.txt`、`legacy-qbb-topology.txt` |
+| Fat-tree | `k4-fat-tree-qbb-topology.txt`、`k8-fat-tree-qbb-topology.txt`、`k8-fat-tree-16core-32aggregation-32edge-128server-topology.txt`、`topology-fat-tree-k8-128-21os.txt`、`topology-fat-tree-k8-128-41os.txt` |
+| Leaf-spine | `leaf-spine-16x8x256-qbb-topology.txt`、`leaf-spine-16x8x256-100g-qbb-topology.txt`、`leaf-spine-16x8x256-100g400g-qbb-topology.txt`、`topology-leaf-spine-4x8x128-41os.txt`、`topology-leaf-spine-8x8x128-21os.txt`、`topology-leaf-spine-8x16x256-21os.txt` |
+
+上述文件均位于 `simulator/ns-3.39/examples/consensus/topologies/`。
+
+### 背景流量
+
+| 分组 | 文件模式 | 说明 |
+| --- | --- | --- |
+| 128-host Hadoop | `bg-hadoop-128host-{5,10,...,50}G-{0t1,2t3}.txt` | 5–50G 的两组时间变体，共 20 个大型工作负载。 |
+| 128-host 聚合样本 | `bg-hadoop-128host-10G-2t3-aggregate10G.txt` | 10G 的聚合版本。 |
+| 8×8×128 Hadoop raw | `bg-hadoop-s8l8h128-{5,10,...,30}G-1s-raw.txt` | 六个 1 秒 raw 工作负载。 |
+| 8×16×256 Hadoop | `bg-hadoop-s8l16h256-4x10G-1s.txt` | 历史跟踪样本，保留在仓库中。 |
+| 小型流量 | `workloads/flows/*.txt` | BIDL attacker-bypass、k8 sequencer congestion 和 legacy blockchain 示例。 |
+
+所有 Hadoop 文件位于 `simulator/ns-3.39/examples/consensus/workloads/hadoop/`。除历史 8×16×256 样本外，它们均是大规模生成输入，已被 `.gitignore` 排除；请通过数据同步或生成流程在本地提供，勿使用 `git add -f` 提交。
 
 This repository contains the source code used for the following papers: 
 - [PowerTCP (NSDI 2022)](https://www.usenix.org/conference/nsdi22/presentation/addanki)
