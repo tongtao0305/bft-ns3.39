@@ -113,8 +113,8 @@ for load in "${requested_loads[@]}"; do
     status "${load}G" SKIPPED_COMPLETE - 0
     continue
   fi
-  record_count=$(wc -l <"${flow_file}")
-  awk -v count="${record_count}" 'BEGIN { print count } { $7 = 0; print }' "${flow_file}" >"${normalized_file}"
+  # Source traces already include the count header and background app_id=0.
+  cp -- "${flow_file}" "${normalized_file}"
   pending+=("${load}")
 done
 

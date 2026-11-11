@@ -44,8 +44,8 @@ for load in "${loads[@]}"; do
   run_dir="${result_dir}/hadoop-${load}G"
   normalized_file="${normalized_dir}/bg-hadoop-128host-${load}G-0t1.txt"
   [[ -f "${flow_file}" ]] || { echo "Missing workload: ${flow_file}" >&2; exit 1; }
-  record_count=$(wc -l <"${flow_file}")
-  awk -v count="${record_count}" 'BEGIN { print count } { $7 = 0; print }' "${flow_file}" >"${normalized_file}"
+  # Source traces already include the count header and background app_id=0.
+  cp -- "${flow_file}" "${normalized_file}"
   mkdir -p "${run_dir}"
   (
     cd "${ns3_dir}"
