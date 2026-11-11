@@ -40,8 +40,8 @@ __pycache__/
 # Simulation outputs
 simulator/ns-3.39/results/
 simulator/ns-3.39/run-logs/
-
-# Large generated Hadoop workloads are synchronized or regenerated locally.
-# Keep the historical 8x16x256 sample tracked during the repository migration.
-simulator/ns-3.39/examples/consensus/workloads/hadoop/*.txt
-!simulator/ns-3.39/examples/consensus/workloads/hadoop/bg-hadoop-s8l16h256-4x10G-1s.txt
+simulator/ns-3.39/examples/consensus/results/
+simulator/ns-3.39/examples/consensus/workloads/gall/
+simulator/ns-3.39/examples/consensus/workloads/gsearch/
+simulator/ns-3.39/examples/consensus/workloads/hadoop/
+simulator/ns-3.39/consensus-results-*.csv

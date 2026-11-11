@@ -1,0 +1,109 @@
+{
+  "description": "BIDL: DCQCN normal control plus paired attack and attack+IORS arms for DCQCN/HPCC/TIMELY/DCTCP; Hadoop 2-3s, fixed seed/run=1.",
+  "seeds": [
+    1
+  ],
+  "defaults": {
+    "run": 1,
+    "requestRate": 30000,
+    "requestCount": 150000,
+    "applicationStartTime": 0,
+    "warmupTime": 0,
+    "measurementTime": 5,
+    "cooldownTime": 15,
+    "simulationTime": 20
+  },
+  "slurm": {
+    "tasks_per_node": 1,
+    "memory": "16G",
+    "time": "04:00:00"
+  },
+  "axes": {
+    "flowFile": [
+      "examples/consensus/workloads/hadoop/bg-hadoop-128host-5G-2t3.txt",
+      "examples/consensus/workloads/hadoop/bg-hadoop-128host-10G-2t3.txt",
+      "examples/consensus/workloads/hadoop/bg-hadoop-128host-15G-2t3.txt",
+      "examples/consensus/workloads/hadoop/bg-hadoop-128host-20G-2t3.txt",
+      "examples/consensus/workloads/hadoop/bg-hadoop-128host-25G-2t3.txt",
+      "examples/consensus/workloads/hadoop/bg-hadoop-128host-30G-2t3.txt",
+      "examples/consensus/workloads/hadoop/bg-hadoop-128host-35G-2t3.txt",
+      "examples/consensus/workloads/hadoop/bg-hadoop-128host-40G-2t3.txt",
+      "examples/consensus/workloads/hadoop/bg-hadoop-128host-45G-2t3.txt",
+      "examples/consensus/workloads/hadoop/bg-hadoop-128host-50G-2t3.txt"
+    ]
+  },
+  "cases": [
+    {
+      "name": "bidl-normal-dcqcn",
+      "base_config": "examples/consensus/configs/baseline/config-bidl-128host-noattack.conf",
+      "parameters": {
+        "scenario": "bidl-normal-dcqcn",
+        "rdmaCcMode": 1
+      }
+    },
+    {
+      "name": "bidl-attack-dcqcn",
+      "base_config": "examples/consensus/configs/baseline/config-bidl-128host-attack.conf",
+      "parameters": {
+        "scenario": "bidl-attack-dcqcn",
+        "rdmaCcMode": 1
+      }
+    },
+    {
+      "name": "bidl-attack-iors-dcqcn",
+      "base_config": "examples/consensus/configs/baseline/config-bidl-128host-attack-iors.conf",
+      "parameters": {
+        "scenario": "bidl-attack-iors-dcqcn",
+        "rdmaCcMode": 1
+      }
+    },
+    {
+      "name": "bidl-attack-hpcc",
+      "base_config": "examples/consensus/configs/baseline/config-bidl-128host-attack.conf",
+      "parameters": {
+        "scenario": "bidl-attack-hpcc",
+        "rdmaCcMode": 3
+      }
+    },
+    {
+      "name": "bidl-attack-timely",
+      "base_config": "examples/consensus/configs/baseline/config-bidl-128host-attack.conf",
+      "parameters": {
+        "scenario": "bidl-attack-timely",
+        "rdmaCcMode": 7
+      }
+    },
+    {
+      "name": "bidl-attack-dctcp",
+      "base_config": "examples/consensus/configs/baseline/config-bidl-128host-attack.conf",
+      "parameters": {
+        "scenario": "bidl-attack-dctcp",
+        "rdmaCcMode": 8
+      }
+    },
+    {
+      "name": "bidl-attack-iors-hpcc",
+      "base_config": "examples/consensus/configs/baseline/config-bidl-128host-attack-iors.conf",
+      "parameters": {
+        "scenario": "bidl-attack-iors-hpcc",
+        "rdmaCcMode": 3
+      }
+    },
+    {
+      "name": "bidl-attack-iors-timely",
+      "base_config": "examples/consensus/configs/baseline/config-bidl-128host-attack-iors.conf",
+      "parameters": {
+        "scenario": "bidl-attack-iors-timely",
+        "rdmaCcMode": 7
+      }
+    },
+    {
+      "name": "bidl-attack-iors-dctcp",
+      "base_config": "examples/consensus/configs/baseline/config-bidl-128host-attack-iors.conf",
+      "parameters": {
+        "scenario": "bidl-attack-iors-dctcp",
+        "rdmaCcMode": 8
+      }
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+# TEMPLATE ONLY: replace controller address and BOTH node resource lines.
+# Query real worker resources with: slurmd -C
+# Install the edited file on all three hosts as /etc/slurm/slurm.conf.
+ClusterName=bft-cluster
+SlurmctldHost=controller(10.134.180.235)
+SlurmUser=slurm
+SlurmdUser=root
+AuthType=auth/munge
+CredType=cred/munge
+SlurmctldPort=6817
+SlurmdPort=6818
+StateSaveLocation=/var/spool/slurmctld
+SlurmdSpoolDir=/var/spool/slurmd
+SchedulerType=sched/backfill
+SelectType=select/cons_tres
+SelectTypeParameters=CR_Core_Memory
+# Basic trusted-user setup; memory is scheduled, not hard-enforced by cgroups.
+ProctrackType=proctrack/linuxproc
+TaskPlugin=task/affinity
+
+# EXAMPLE resources, not detected hardware. RealMemory is in MB.
+NodeName=ubuntu-236 NodeAddr=10.134.180.236 CPUs=16 Sockets=1 CoresPerSocket=8 ThreadsPerCore=2 RealMemory=30000 State=UNKNOWN
+NodeName=ubuntu-237 NodeAddr=10.134.180.237 CPUs=16 Sockets=1 CoresPerSocket=8 ThreadsPerCore=2 RealMemory=30000 State=UNKNOWN
+PartitionName=compute Nodes=ubuntu-236,ubuntu-237 Default=YES MaxTime=INFINITE State=UP

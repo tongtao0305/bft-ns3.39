@@ -11,13 +11,14 @@
 - `bidl-experiment.cc`：由 CMake 构建的 PBFT/BIDL 实验入口。
 - `scripts/local/`、`scripts/slurm/`：本地和 Slurm 实验启动器。
 
+三节点部署、实验配置整理与提交步骤见 [Slurm 中文手册](SLURM_GUIDE.zh-CN.md)，集群配置模板见 [slurm.conf.example](slurm.conf.example)。
+
 ### 拓扑
 
 | 分组 | 文件 |
 | --- | --- |
-| BIDL 攻击与 legacy | `bidl-attacker-bypass-qbb-topology.txt`、`legacy-qbb-topology.txt` |
-| Fat-tree | `k4-fat-tree-qbb-topology.txt`、`k8-fat-tree-qbb-topology.txt`、`k8-fat-tree-16core-32aggregation-32edge-128server-topology.txt`、`topology-fat-tree-k8-128-21os.txt`、`topology-fat-tree-k8-128-41os.txt` |
-| Leaf-spine | `leaf-spine-16x8x256-qbb-topology.txt`、`leaf-spine-16x8x256-100g-qbb-topology.txt`、`leaf-spine-16x8x256-100g400g-qbb-topology.txt`、`topology-leaf-spine-4x8x128-41os.txt`、`topology-leaf-spine-8x8x128-21os.txt`、`topology-leaf-spine-8x16x256-21os.txt` |
+| Fat-tree | `topology-fat-tree-k8-128-21os.txt`、`topology-fat-tree-k8-128-41os.txt` |
+| Leaf-spine | `topology-leaf-spine-4x8x128-41os.txt`、`topology-leaf-spine-8x8x128-21os.txt`、`topology-leaf-spine-8x16x256-21os.txt`、`topology-leaf-spine-8x16x256-41os.txt` |
 
 上述文件均位于 `simulator/ns-3.39/examples/consensus/topologies/`。
 
