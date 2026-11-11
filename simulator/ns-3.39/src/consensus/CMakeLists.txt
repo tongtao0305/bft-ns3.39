@@ -1,3 +1,5 @@
+find_package(OpenSSL REQUIRED)
+
 build_lib(
   LIBNAME consensus
   SOURCE_FILES
@@ -11,6 +13,9 @@ build_lib(
     model/consensus-transport.cc
     model/consensus-workload.cc
     model/pbft-engine.cc
+    model/zyzzyva-engine.cc
+    model/zyzzyva-auth.cc
+    model/ezbft-engine.cc
   HEADER_FILES
     helper/consensus-experiment.h
     helper/consensus-helper.h
@@ -22,6 +27,9 @@ build_lib(
     model/consensus-transport.h
     model/consensus-workload.h
     model/pbft-engine.h
+    model/zyzzyva-engine.h
+    model/zyzzyva-auth.h
+    model/ezbft-engine.h
   LIBRARIES_TO_LINK
     ${libcore}
     ${libnetwork}
@@ -30,6 +38,7 @@ build_lib(
     ${libcsma}
     ${libpoint-to-point}
     ${libtraffic-control}
+    OpenSSL::Crypto
   TEST_SOURCES
     test/consensus-test-suite.cc
 )

@@ -12,6 +12,7 @@
 #include "ns3/int-header.h"
 #include "ns3/simulator.h"
 #include <cmath>
+#include <algorithm>
 #include "ns3/tcp-header.h"
 #include "ns3/udp-header.h"
 #include "ns3/custom-priority-tag.h"
@@ -50,10 +51,39 @@ TypeId SwitchNode::GetTypeId (void)
 	                                  BooleanValue(false),
 	                                  MakeBooleanAccessor(&SwitchNode::PowerEnabled),
 	                                  MakeBooleanChecker())
+	                    .AddAttribute("IorsMode", "0=off, 1=mark, 2=fixed bounded wait, 3=RTT bounded wait.",
+	                                  UintegerValue(0), MakeUintegerAccessor(&SwitchNode::m_iorsMode),
+	                                  MakeUintegerChecker<uint32_t>(0, 3))
+	                    .AddAttribute("IorsDetectOnly", "Count conflicts without marking or changing packets.",
+	                                  BooleanValue(false), MakeBooleanAccessor(&SwitchNode::m_iorsDetectOnly),
+	                                  MakeBooleanChecker())
+	                    .AddAttribute("IorsCapacity", "Maximum candidate bindings.", UintegerValue(4096),
+	                                  MakeUintegerAccessor(&SwitchNode::m_iorsCapacity), MakeUintegerChecker<uint32_t>())
+	                    .AddAttribute("IorsFingerprintBits", "Bits retained in the key fingerprint; collisions bypass detection.",
+	                                  UintegerValue(64), MakeUintegerAccessor(&SwitchNode::m_iorsFingerprintBits),
+	                                  MakeUintegerChecker<uint32_t>(1, 64))
+	                    .AddAttribute("IorsHoldCapacity", "Maximum packets awaiting bounded forwarding.", UintegerValue(128),
+	                                  MakeUintegerAccessor(&SwitchNode::m_iorsHoldCapacity), MakeUintegerChecker<uint32_t>())
+	                    .AddAttribute("IorsTtl", "Binding lifetime.", TimeValue(MilliSeconds(10)),
+	                                  MakeTimeAccessor(&SwitchNode::m_iorsTtl), MakeTimeChecker())
+	                    .AddAttribute("IorsFixedWait", "Fixed intervention duration.", TimeValue(MicroSeconds(10)),
+	                                  MakeTimeAccessor(&SwitchNode::m_iorsFixedWait), MakeTimeChecker())
+	                    .AddAttribute("IorsMaxWait", "Maximum intervention duration.", TimeValue(MicroSeconds(100)),
+	                                  MakeTimeAccessor(&SwitchNode::m_iorsMaxWait), MakeTimeChecker())
+	                    .AddAttribute("IorsZyzReplicaCount", "Zyzzyva replica count for primary authorization.", UintegerValue(4),
+	                                  MakeUintegerAccessor(&SwitchNode::m_iorsZyzReplicaCount), MakeUintegerChecker<uint32_t>(1))
+	                    .AddAttribute("IorsBidlSequencerId", "Authorized BIDL sequencer identity.", UintegerValue(200),
+	                                  MakeUintegerAccessor(&SwitchNode::m_iorsBidlSequencerId), MakeUintegerChecker<uint32_t>())
+                        .AddAttribute("IorsBidlOrdererCount", "PBFT rotating sequencer count; zero uses the fixed sequencer.", UintegerValue(0),
+                                      MakeUintegerAccessor(&SwitchNode::m_iorsBidlOrdererCount), MakeUintegerChecker<uint32_t>())
 	                    .AddTraceSource("EcnMark",
 	                                    "Packet marked CE by the switch.",
 	                                    MakeTraceSourceAccessor(&SwitchNode::m_ecnMarkTrace),
 	                                    "ns3::Packet::TracedCallback")
+	                    .AddTraceSource("IorsConflict",
+	                                    "An IORS conflict candidate or unauthorized ordering message was observed.",
+	                                    MakeTraceSourceAccessor(&SwitchNode::m_iorsConflictTrace),
+	                                    "ns3::SwitchNode::IorsConflictTracedCallback")
 
 	                    ;
 	return tid;
@@ -233,8 +263,157 @@ void SwitchNode::ClearTable() {
 
 // This function can only be called in switch mode
 bool SwitchNode::SwitchReceiveFromDevice(Ptr<NetDevice> device, Ptr<Packet> packet, CustomHeader &ch) {
+	if (m_iorsMode != 0 && ch.l3Prot == 0x11 && IorsInspect(packet, ch, device->GetIfIndex()))
+		return true;
 	SendToDev(packet, ch);
 	return true;
+}
+
+void SwitchNode::SetIorsSource(uint32_t ipv4Address, uint32_t senderId) {
+	m_iorsSources[ipv4Address] = senderId;
+}
+
+void SwitchNode::SetIorsIngressPort(uint32_t port, uint32_t ipv4Address) {
+	m_iorsIngressPorts[port] = ipv4Address;
+}
+
+bool SwitchNode::IorsBind(const IorsKey& key, uint64_t value, bool& conflict) {
+	auto existing = m_iorsEntries.find(key);
+	if (existing != m_iorsEntries.end() && existing->second.expires <= Simulator::Now()) {
+		m_iorsEntries.erase(existing);
+		++m_iorsExpired;
+		existing = m_iorsEntries.end();
+	}
+	if (existing != m_iorsEntries.end()) {
+		conflict = existing->second.value != value;
+		return true;
+	}
+	uint64_t fingerprint = 1469598103934665603ULL;
+	auto mix = [&fingerprint](uint64_t word) {
+		fingerprint ^= word;
+		fingerprint *= 1099511628211ULL;
+	};
+	mix(std::get<0>(key)); mix(std::get<1>(key)); mix(std::get<2>(key)); mix(std::get<3>(key));
+	if (m_iorsFingerprintBits < 64) fingerprint &= (1ULL << m_iorsFingerprintBits) - 1;
+	auto owner = m_iorsFingerprints.find(fingerprint);
+	if (owner != m_iorsFingerprints.end() && owner->second.second <= Simulator::Now()) {
+		m_iorsFingerprints.erase(owner);
+		owner = m_iorsFingerprints.end();
+	}
+	if (owner != m_iorsFingerprints.end() && owner->second.first != key) {
+		++m_iorsCollisionBypass;
+		return false;
+	}
+	if (m_iorsEntries.size() >= m_iorsCapacity) {
+		for (auto it = m_iorsEntries.begin(); it != m_iorsEntries.end();) {
+			if (it->second.expires <= Simulator::Now()) {
+				it = m_iorsEntries.erase(it);
+				++m_iorsExpired;
+			}
+			else ++it;
+		}
+	}
+	if (m_iorsFingerprints.size() >= m_iorsCapacity) {
+		for (auto it = m_iorsFingerprints.begin(); it != m_iorsFingerprints.end();) {
+			if (it->second.second <= Simulator::Now()) it = m_iorsFingerprints.erase(it);
+			else ++it;
+		}
+	}
+	if (m_iorsEntries.size() >= m_iorsCapacity) {
+		++m_iorsCapacityBypass;
+		return false;
+	}
+	m_iorsEntries.emplace(key, IorsEntry{value, Simulator::Now() + m_iorsTtl});
+	m_iorsFingerprints[fingerprint] = {key, Simulator::Now() + m_iorsTtl};
+	conflict = false;
+	return true;
+}
+
+void SwitchNode::IorsForward(Ptr<Packet> packet, CustomHeader header) {
+	if (m_iorsHeld > 0) --m_iorsHeld;
+	SendToDev(packet, header);
+}
+
+bool SwitchNode::IorsInspect(Ptr<Packet> packet, const CustomHeader& header, uint32_t ingressPort) {
+	const uint32_t length = packet->GetSize();
+	if (length < 74) return false;
+	uint8_t* bytes = packet->GetBuffer();
+	auto read16 = [bytes](uint32_t pos) { return (uint32_t(bytes[pos]) << 8) | bytes[pos + 1]; };
+	auto read32 = [bytes](uint32_t pos) { return (uint32_t(bytes[pos]) << 24) | (uint32_t(bytes[pos + 1]) << 16) |
+		(uint32_t(bytes[pos + 2]) << 8) | bytes[pos + 3]; };
+	auto read64 = [&read32](uint32_t pos) { return (uint64_t(read32(pos)) << 32) | read32(pos + 4); };
+	const uint32_t searchEnd = std::min<uint32_t>(128, length - 74);
+	for (uint32_t base = 0; base <= searchEnd; ++base) {
+		if (read16(base) != 0xc05e || bytes[base + 2] != 1) continue;
+		uint16_t kind = read16(base + 4);
+		if (kind != 30 && kind != 65 && kind != 40 && kind != 50) continue;
+		if (((kind == 30 || kind == 65) && bytes[base + 3] != 0) || (kind == 40 && bytes[base + 3] != 3) ||
+			(kind == 50 && bytes[base + 3] != 4)) continue;
+		if (read32(base + 38) + 66ULL != length - base) continue;
+		uint32_t ext = base + 66;
+		if (bytes[ext] != 'I' || bytes[ext + 1] != 'O' || bytes[ext + 2] != 'R' || bytes[ext + 3] != 'S') continue;
+		++m_iorsObserved;
+		if (bytes[ext + 4] & 1) {
+			++m_iorsAlreadyMarked;
+			return false; // Already marked: no lookup and no state insertion.
+		}
+		uint32_t sender = read32(base + 6);
+		uint64_t view = read64(base + 14);
+		uint64_t slot = read64(base + 22);
+		uint64_t digest = read64(base + 42);
+		uint32_t clientId = read32(base + 50);
+		uint64_t requestId = read64(base + 54);
+		auto source = m_iorsSources.find(header.sip);
+		if (source == m_iorsSources.end()) return false;
+		auto expectedIp = m_iorsIngressPorts.find(ingressPort);
+		bool unauthorized = (expectedIp != m_iorsIngressPorts.end() && expectedIp->second != header.sip) ||
+			source->second != sender ||
+			(kind == 30 && sender != (m_iorsBidlOrdererCount ? view % m_iorsBidlOrdererCount : m_iorsBidlSequencerId)) ||
+			(kind == 65 && sender != m_iorsBidlSequencerId && sender >= m_iorsBidlOrdererCount) ||
+			(kind == 40 && sender != view % m_iorsZyzReplicaCount);
+		bool conflict = false;
+		if (!unauthorized) {
+			if (kind == 30 || kind == 65) {
+				bool reverseConflict = false;
+				if (!IorsBind(IorsKey{0, view, slot, 0}, digest, conflict)) return false;
+				if (!IorsBind(IorsKey{1, view, requestId, clientId}, slot, reverseConflict)) return false;
+				conflict = conflict || reverseConflict;
+			} else {
+				if (!IorsBind(IorsKey{kind == 40 ? 2U : 3U, view, slot, sender}, digest, conflict)) return false;
+			}
+		}
+		if (!unauthorized && !conflict) return false;
+		if (m_iorsDetectOnly) {
+			if (unauthorized) ++m_iorsUnauthorized;
+			else ++m_iorsEquivocation;
+			m_iorsConflictTrace(GetId(), bytes[base + 3], sender, view, slot, digest,
+			                    unauthorized ? 1 : 2, Simulator::Now());
+			return false;
+		}
+		bytes[ext + 4] |= 1;
+		++m_iorsMarked;
+	if (unauthorized) ++m_iorsUnauthorized;
+	else ++m_iorsEquivocation;
+		m_iorsConflictTrace(GetId(), bytes[base + 3], sender, view, slot, digest,
+		                    unauthorized ? 1 : 2, Simulator::Now());
+		bytes[ext + 5] = unauthorized ? 1 : 2;
+		if ((kind == 30 || kind == 65) && unauthorized && m_iorsMode >= 2 && !bytes[ext + 6] &&
+			m_iorsHeld < m_iorsHoldCapacity) {
+			Time delay = m_iorsMode == 2 ? m_iorsFixedWait : NanoSeconds(m_maxRtt / 2);
+			delay = std::min(delay, m_iorsMaxWait);
+			if (delay.IsPositive()) {
+				bytes[ext + 6] = 1;
+				++m_iorsHeld;
+				++m_iorsWaited;
+				Simulator::Schedule(delay, &SwitchNode::IorsForward, this, packet, header);
+				return true;
+			}
+		}
+	if ((kind == 30 || kind == 65) && unauthorized && m_iorsMode >= 2 && m_iorsHeld >= m_iorsHoldCapacity)
+		++m_iorsHoldBypass;
+		return false;
+	}
+	return false;
 }
 
 void SwitchNode::SwitchNotifyDequeue(uint32_t ifIndex, uint32_t qIndex, Ptr<Packet> p) {

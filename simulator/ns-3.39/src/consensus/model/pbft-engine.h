@@ -46,7 +46,18 @@ namespace ns3 {
     };
 
     struct PbftViewChangeState {
+        struct PreparedRecord {
+            uint64_t view{0};
+            uint64_t sequence{0};
+            uint64_t digest{0};
+            uint32_t clientId{0};
+            uint64_t requestId{0};
+            uint32_t transactionCount{0};
+            std::set<uint32_t> prepareSenders;
+        };
         std::set<uint32_t> senders;
+        std::map<uint32_t, std::vector<PreparedRecord>> reports;
+        std::map<uint64_t, PreparedRecord> preparedHistory;
         bool localVoteSent{false};
         bool newViewSent{false};
         uint32_t retransmissions{0};
@@ -56,10 +67,8 @@ namespace ns3 {
     /**
      * \ingroup consensus
      * PBFT performance engine with normal-path quorum processing, retransmission,
-     * and a liveness-oriented view change. Messages are isolated by
-     * (view, instanceId), deduplicated by sender, and only one decision can be
-     * produced per instance. The view-change path intentionally does not model
-     * full prepared-certificate, checkpoint, or log-transfer safety semantics.
+     * and prepared-history transfer during view changes. This packet-level model
+     * retains quorum identities but does not model PBFT's cryptographic proofs.
      */
     class PbftEngine : public ConsensusEngine {
         public:
@@ -75,6 +84,7 @@ namespace ns3 {
 
         uint64_t GetDecidedCount() const;
         uint64_t GetCurrentView() const;
+        void RequestViewChange();
         uint32_t GetLeaderId() const override;
         uint32_t GetCurrentPrimary() const;
         const std::map<std::pair<uint64_t, uint64_t>, PbftInstance>& GetInstances() const;
@@ -99,6 +109,21 @@ namespace ns3 {
         void HandleViewChangeTimeout(uint64_t view);
         void TryEnterView(uint64_t view);
         void EnterView(uint64_t view);
+        std::vector<PbftViewChangeState::PreparedRecord> LocalPreparedHistory(uint64_t target) const;
+        bool ValidatePreparedReport(const std::vector<PbftViewChangeState::PreparedRecord>& report, uint64_t target) const;
+        bool SelectPreparedHistory(const std::map<uint32_t, std::vector<PbftViewChangeState::PreparedRecord>>& reports,
+                                   std::map<uint64_t, PbftViewChangeState::PreparedRecord>& selected) const;
+        static void Write32(std::vector<uint8_t>& bytes, uint32_t value);
+        static void Write64(std::vector<uint8_t>& bytes, uint64_t value);
+        static bool Read32(const std::vector<uint8_t>& bytes, size_t& offset, uint32_t& value);
+        static bool Read64(const std::vector<uint8_t>& bytes, size_t& offset, uint64_t& value);
+        static void EncodeRecord(std::vector<uint8_t>& bytes, const PbftViewChangeState::PreparedRecord& record);
+        static bool DecodeRecord(const std::vector<uint8_t>& bytes, size_t& offset,
+                                 PbftViewChangeState::PreparedRecord& record);
+        static void EncodeReport(std::vector<uint8_t>& bytes,
+                                 const std::vector<PbftViewChangeState::PreparedRecord>& report);
+        static bool DecodeReport(const std::vector<uint8_t>& bytes, size_t& offset,
+                                 std::vector<PbftViewChangeState::PreparedRecord>& report);
         void ProposeRequest(const ClientRequest& request);
         void ProposePendingRequests();
         void Broadcast(ConsensusMessage message);
@@ -127,6 +152,7 @@ namespace ns3 {
         bool m_running;
 
         std::map<InstanceKey, PbftInstance> m_instances;
+        std::map<uint64_t, uint64_t> m_decidedBySequence;
         std::map<uint64_t, PbftViewChangeState> m_viewChanges;
         std::map<uint64_t, ConsensusMessage> m_pendingNewViews;
         std::map<std::pair<uint32_t, uint64_t>, ClientRequest> m_pendingRequests;

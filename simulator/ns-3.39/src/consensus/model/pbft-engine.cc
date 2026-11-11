@@ -63,6 +63,7 @@ namespace ns3 {
         NS_ABORT_MSG_IF(!IsReplica(m_primaryId), "PBFT primary is not in the replica set");
         NS_ABORT_MSG_IF(!IsReplica(m_replicaId), "Local replica is not in the replica set");
         m_running = true;
+        ReportLeader(m_view, GetPrimaryForView(m_view));
     }
 
     void PbftEngine::Stop() {
@@ -212,6 +213,8 @@ namespace ns3 {
         if (message.senderId != GetPrimaryForView(message.view)) {
             return;
         }
+        auto decided = m_decidedBySequence.find(message.instanceId);
+        if (decided != m_decidedBySequence.end() && decided->second != message.digest) return;
 
         PbftInstance& instance = GetInstance(message.view, message.instanceId);
         if (instance.prePrepareAccepted) {
@@ -311,6 +314,12 @@ namespace ns3 {
         if (instance.decided || !instance.prepared || instance.commitSenders.size() < 2 * m_faultTolerance + 1) {
             return;
         }
+        auto decided = m_decidedBySequence.find(instance.sequence);
+        if (decided != m_decidedBySequence.end()) {
+            if (decided->second != instance.digest) StartViewChange(m_view + 1);
+            return;
+        }
+        m_decidedBySequence[instance.sequence] = instance.digest;
 
         instance.decided = true;
         if (instance.timeoutEvent.IsRunning()) {
@@ -374,6 +383,108 @@ namespace ns3 {
         ScheduleInstanceTimeout(instance);
     }
 
+    void PbftEngine::RequestViewChange() {
+        StartViewChange(m_view + 1);
+    }
+
+    void PbftEngine::Write32(std::vector<uint8_t>& b, uint32_t v) {
+        for (int shift = 24; shift >= 0; shift -= 8) b.push_back(static_cast<uint8_t>(v >> shift));
+    }
+    void PbftEngine::Write64(std::vector<uint8_t>& b, uint64_t v) {
+        for (int shift = 56; shift >= 0; shift -= 8) b.push_back(static_cast<uint8_t>(v >> shift));
+    }
+    bool PbftEngine::Read32(const std::vector<uint8_t>& b, size_t& pos, uint32_t& v) {
+        if (b.size() - std::min(pos, b.size()) < 4) return false;
+        v = 0;
+        for (int i = 0; i < 4; ++i) v = (v << 8) | b[pos++];
+        return true;
+    }
+    bool PbftEngine::Read64(const std::vector<uint8_t>& b, size_t& pos, uint64_t& v) {
+        if (b.size() - std::min(pos, b.size()) < 8) return false;
+        v = 0;
+        for (int i = 0; i < 8; ++i) v = (v << 8) | b[pos++];
+        return true;
+    }
+    void PbftEngine::EncodeRecord(std::vector<uint8_t>& b, const PbftViewChangeState::PreparedRecord& r) {
+        Write64(b, r.view); Write64(b, r.sequence); Write64(b, r.digest);
+        Write32(b, r.clientId); Write64(b, r.requestId); Write32(b, r.transactionCount);
+        Write32(b, r.prepareSenders.size());
+        for (uint32_t sender : r.prepareSenders) Write32(b, sender);
+    }
+    bool PbftEngine::DecodeRecord(const std::vector<uint8_t>& b, size_t& pos, PbftViewChangeState::PreparedRecord& r) {
+        uint32_t count;
+        if (!Read64(b, pos, r.view) || !Read64(b, pos, r.sequence) || !Read64(b, pos, r.digest) ||
+            !Read32(b, pos, r.clientId) || !Read64(b, pos, r.requestId) ||
+            !Read32(b, pos, r.transactionCount) || !Read32(b, pos, count) || count > 100000) return false;
+        for (uint32_t i = 0; i < count; ++i) {
+            uint32_t sender;
+            if (!Read32(b, pos, sender) || !r.prepareSenders.insert(sender).second) return false;
+        }
+        return true;
+    }
+    void PbftEngine::EncodeReport(std::vector<uint8_t>& b,
+                                  const std::vector<PbftViewChangeState::PreparedRecord>& report) {
+        Write32(b, report.size());
+        for (const auto& record : report) EncodeRecord(b, record);
+    }
+    bool PbftEngine::DecodeReport(const std::vector<uint8_t>& b, size_t& pos,
+                                  std::vector<PbftViewChangeState::PreparedRecord>& report) {
+        uint32_t count;
+        if (!Read32(b, pos, count) || count > 100000) return false;
+        for (uint32_t i = 0; i < count; ++i) {
+            PbftViewChangeState::PreparedRecord record;
+            if (!DecodeRecord(b, pos, record)) return false;
+            report.push_back(record);
+        }
+        return true;
+    }
+    std::vector<PbftViewChangeState::PreparedRecord> PbftEngine::LocalPreparedHistory(uint64_t target) const {
+        std::map<uint64_t, PbftViewChangeState::PreparedRecord> bySequence;
+        for (const auto& pair : m_instances) {
+            const PbftInstance& instance = pair.second;
+            if ((!instance.prepared && !instance.decided) || instance.view >= target) continue;
+            auto found = bySequence.find(instance.sequence);
+            if (found != bySequence.end() && found->second.view >= instance.view) continue;
+            PbftViewChangeState::PreparedRecord record;
+            record.view = instance.view;
+            record.sequence = instance.sequence;
+            record.digest = instance.digest;
+            record.clientId = instance.clientId;
+            record.requestId = instance.requestId;
+            record.transactionCount = instance.transactionCount;
+            record.prepareSenders = instance.prepareSenders;
+            bySequence[record.sequence] = record;
+        }
+        std::vector<PbftViewChangeState::PreparedRecord> result;
+        for (const auto& pair : bySequence) result.push_back(pair.second);
+        return result;
+    }
+    bool PbftEngine::ValidatePreparedReport(const std::vector<PbftViewChangeState::PreparedRecord>& report,
+                                             uint64_t target) const {
+        std::set<uint64_t> sequences;
+        for (const auto& record : report) {
+            if (record.view >= target || record.sequence == 0 || record.digest == 0 ||
+                record.transactionCount == 0 || record.prepareSenders.size() < 2 * m_faultTolerance ||
+                !sequences.insert(record.sequence).second) return false;
+            for (uint32_t sender : record.prepareSenders) if (!IsReplica(sender)) return false;
+        }
+        return true;
+    }
+    bool PbftEngine::SelectPreparedHistory(
+        const std::map<uint32_t, std::vector<PbftViewChangeState::PreparedRecord>>& reports,
+        std::map<uint64_t, PbftViewChangeState::PreparedRecord>& selected) const {
+        for (const auto& report : reports) {
+            for (const auto& record : report.second) {
+                auto found = selected.find(record.sequence);
+                if (found == selected.end() || record.view > found->second.view) selected[record.sequence] = record;
+                else if (record.view == found->second.view &&
+                    (record.digest != found->second.digest || record.clientId != found->second.clientId ||
+                     record.requestId != found->second.requestId)) return false;
+            }
+        }
+        return true;
+    }
+
     void PbftEngine::StartViewChange(uint64_t newView) {
         if (!m_running || newView <= m_view) {
             return;
@@ -383,11 +494,12 @@ namespace ns3 {
         if (!state.localVoteSent) {
             state.localVoteSent = true;
             state.senders.insert(m_replicaId);
+            state.reports[m_replicaId] = LocalPreparedHistory(newView);
             ConsensusMessage message;
             message.protocol = ConsensusProtocol::PBFT;
             message.type = ConsensusMessageType::VIEW_CHANGE;
             message.view = newView;
-            message.payloadSize = m_controlPayloadBytes;
+            EncodeReport(message.payloadBytes, state.reports[m_replicaId]);
             Broadcast(message);
         }
 
@@ -399,22 +511,34 @@ namespace ns3 {
     }
 
     void PbftEngine::HandleViewChange(const ConsensusMessage& message) {
-        if (message.view <= m_view) {
+        if (message.view <= m_view || !IsReplica(message.senderId)) {
             return;
         }
+        size_t offset = 0;
+        std::vector<PbftViewChangeState::PreparedRecord> report;
+        if (!DecodeReport(message.payloadBytes, offset, report) || offset != message.payloadBytes.size() ||
+            !ValidatePreparedReport(report, message.view)) return;
         PbftViewChangeState& state = m_viewChanges[message.view];
         state.senders.insert(message.senderId);
+        state.reports.emplace(message.senderId, report);
         if (!state.localVoteSent) {
             StartViewChange(message.view);
         }
 
         if (m_replicaId == GetPrimaryForView(message.view) && state.senders.size() >= 2 * m_faultTolerance + 1 && !state.newViewSent) {
+            if (!SelectPreparedHistory(state.reports, state.preparedHistory)) return;
             state.newViewSent = true;
             ConsensusMessage newView;
             newView.protocol = ConsensusProtocol::PBFT;
             newView.type = ConsensusMessageType::NEW_VIEW;
             newView.view = message.view;
-            newView.payloadSize = m_controlPayloadBytes;
+            Write32(newView.payloadBytes, state.reports.size());
+            for (const auto& pair : state.reports) {
+                Write32(newView.payloadBytes, pair.first);
+                EncodeReport(newView.payloadBytes, pair.second);
+            }
+            Write32(newView.payloadBytes, state.preparedHistory.size());
+            for (const auto& pair : state.preparedHistory) EncodeRecord(newView.payloadBytes, pair.second);
             Broadcast(newView);
             EnterView(message.view);
             return;
@@ -426,6 +550,39 @@ namespace ns3 {
         if (message.view <= m_view || message.senderId != GetPrimaryForView(message.view)) {
             return;
         }
+        size_t offset = 0;
+        uint32_t count;
+        if (!Read32(message.payloadBytes, offset, count) || count < 2 * m_faultTolerance + 1 ||
+            count > m_replicaIds.size()) return;
+        std::map<uint32_t, std::vector<PbftViewChangeState::PreparedRecord>> reports;
+        for (uint32_t i = 0; i < count; ++i) {
+            uint32_t sender;
+            std::vector<PbftViewChangeState::PreparedRecord> report;
+            if (!Read32(message.payloadBytes, offset, sender) || !IsReplica(sender) || reports.count(sender) ||
+                !DecodeReport(message.payloadBytes, offset, report) ||
+                !ValidatePreparedReport(report, message.view)) return;
+            reports.emplace(sender, report);
+        }
+        if (!Read32(message.payloadBytes, offset, count) || count > 100000) return;
+        std::map<uint64_t, PbftViewChangeState::PreparedRecord> selected;
+        for (uint32_t i = 0; i < count; ++i) {
+            PbftViewChangeState::PreparedRecord record;
+            if (!DecodeRecord(message.payloadBytes, offset, record) || selected.count(record.sequence)) return;
+            selected.emplace(record.sequence, record);
+        }
+        if (offset != message.payloadBytes.size()) return;
+        std::map<uint64_t, PbftViewChangeState::PreparedRecord> expected;
+        if (!SelectPreparedHistory(reports, expected) || expected.size() != selected.size()) return;
+        for (const auto& pair : expected) {
+            auto found = selected.find(pair.first);
+            if (found == selected.end() || found->second.view != pair.second.view ||
+                found->second.digest != pair.second.digest || found->second.clientId != pair.second.clientId ||
+                found->second.requestId != pair.second.requestId) return;
+        }
+        PbftViewChangeState& state = m_viewChanges[message.view];
+        state.reports = reports;
+        state.preparedHistory = selected;
+        for (const auto& pair : reports) state.senders.insert(pair.first);
         m_pendingNewViews[message.view] = message;
         TryEnterView(message.view);
     }
@@ -464,6 +621,26 @@ namespace ns3 {
         }
         m_viewChangedTrace(m_replicaId, view, GetPrimaryForView(view));
         ReportLeader(view, GetPrimaryForView(view));
+        m_nextSequence = m_decidedBySequence.empty() ? 1 : m_decidedBySequence.rbegin()->first + 1;
+        for (const auto& pair : state.preparedHistory) {
+            const auto& record = pair.second;
+            m_nextSequence = std::max(m_nextSequence, record.sequence + 1);
+            if (m_decidedBySequence.count(record.sequence) != 0) continue;
+            PbftInstance& instance = GetInstance(view, record.sequence);
+            instance.view = view;
+            instance.sequence = record.sequence;
+            instance.digest = record.digest;
+            instance.clientId = record.clientId;
+            instance.requestId = record.requestId;
+            instance.transactionCount = record.transactionCount;
+            instance.prePrepareAccepted = true;
+            instance.proposalTime = Simulator::Now();
+            m_pendingRequests.erase({record.clientId, record.requestId});
+            ScheduleInstanceTimeout(instance);
+            if (m_replicaId == GetPrimaryForView(view))
+                Broadcast(MakeMessage(ConsensusMessageType::PRE_PREPARE, instance));
+            else SendPrepare(instance);
+        }
         if (m_replicaId == GetPrimaryForView(view)) {
             ProposePendingRequests();
         }

@@ -1,12 +1,13 @@
 #include "ns3/consensus-experiment.h"
 #include "ns3/consensus-runner.h"
 
+#include <exception>
 #include <iomanip>
 #include <iostream>
 
 using namespace ns3;
 
-int main(int argc, char* argv[]) {
+static int RunExperiment(int argc, char* argv[]) {
     ConsensusExperimentConfig config;
     config.ApplyPreset("pbft-tcp");
     config.outputPrefix = "consensus-results";
@@ -36,4 +37,14 @@ int main(int argc, char* argv[]) {
               << " transaction_throughput=" << result.transactionThroughput << " tx/s"
               << " output=" << config.outputPrefix << "-*.csv" << std::endl;
     return result.success ? 0 : 1;
+}
+
+
+int main(int argc, char* argv[]) {
+    try {
+        return RunExperiment(argc, argv);
+    } catch (const std::exception& error) {
+        std::cerr << "consensus experiment failed: " << error.what() << std::endl;
+        return 2;
+    }
 }

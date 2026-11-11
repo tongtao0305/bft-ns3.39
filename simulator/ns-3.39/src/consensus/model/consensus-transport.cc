@@ -439,12 +439,16 @@ namespace ns3 {
                 .AddAttribute("Window", "Maximum RDMA bytes in flight; zero uses rate control defaults.", UintegerValue(0),
                               MakeUintegerAccessor(&RdmaConsensusTransport::m_window), MakeUintegerChecker<uint32_t>())
                 .AddAttribute("BaseRttNs", "Base RTT supplied to the RDMA congestion controller.", UintegerValue(100000),
-                              MakeUintegerAccessor(&RdmaConsensusTransport::m_baseRttNs), MakeUintegerChecker<uint64_t>());
+                              MakeUintegerAccessor(&RdmaConsensusTransport::m_baseRttNs), MakeUintegerChecker<uint64_t>())
+                .AddAttribute("IorsWireEnabled", "Reserve the mutable IORS wire extension on candidate messages.",
+                              BooleanValue(false), MakeBooleanAccessor(&RdmaConsensusTransport::m_iorsWireEnabled),
+                              MakeBooleanChecker());
         return tid;
     }
 
     RdmaConsensusTransport::RdmaConsensusTransport()
-        : m_priorityGroup(3), m_nextSourcePort(10000), m_window(0), m_baseRttNs(100000), m_running(false) {}
+        : m_priorityGroup(3), m_nextSourcePort(10000), m_window(0), m_baseRttNs(100000), m_iorsWireEnabled(false),
+          m_running(false) {}
 
     void RdmaConsensusTransport::Start(Ptr<Node> node) {
         NS_ABORT_MSG_IF(m_running, "RDMA consensus transport is already running");
@@ -466,7 +470,8 @@ namespace ns3 {
         }
         m_running = false;
         m_reassembly.clear();
-        m_sourcePortPeers.clear();
+        m_sourcePortsInUse.clear();
+        m_waitingForSourcePort.clear();
     }
 
     void RdmaConsensusTransport::Send(uint32_t peerId, Ptr<Packet> packet, const ConsensusTransportMetadata& metadata) {
@@ -475,6 +480,17 @@ namespace ns3 {
             return;
         }
 
+        if (m_iorsWireEnabled) {
+            ConsensusMessage message;
+            if (ConsensusMessage::FromPacket(packet, message) &&
+                (message.type == ConsensusMessageType::BIDL_TRANSACTION ||
+                 message.type == ConsensusMessageType::BIDL_TRANSACTION_REPAIR ||
+                 message.type == ConsensusMessageType::ZYZZYVA_ORDER_REQ ||
+                 message.type == ConsensusMessageType::EZBFT_SPEC_ORDER) && !message.iorsPresent) {
+                message.iorsPresent = true;
+                packet = message.ToPacket();
+            }
+        }
         ConsensusTransportMetadata normalized = AttachMetadataTag(packet, metadata, static_cast<uint8_t>(m_priorityGroup));
         ConsensusFaultDecision fault = EvaluateFault(peerId, packet, CONSENSUS_FAULT_SEND);
         if (fault.drop) {
@@ -495,11 +511,15 @@ namespace ns3 {
 
         InetSocketAddress local = InetSocketAddress::ConvertFrom(m_localAddress);
         InetSocketAddress remote = InetSocketAddress::ConvertFrom(peer->second);
-        uint16_t sourcePort = AllocateSourcePort();
-        m_sourcePortPeers[sourcePort] = peerId;
+        uint16_t sourcePort = AllocateSourcePort(peerId);
+        if (sourcePort == 0) {
+            m_waitingForSourcePort[peerId].push_back({packet->Copy(), metadata});
+            return;
+        }
+        m_sourcePortsInUse.insert({peerId, sourcePort});
 
         m_driver->AddQueuePair(packet->Copy(), metadata.priorityGroup, local.GetIpv4(), remote.GetIpv4(), sourcePort, remote.GetPort(),
-                               m_window, m_baseRttNs, MakeCallback(&RdmaConsensusTransport::HandleSendComplete, this).Bind(sourcePort),
+                               m_window, m_baseRttNs, MakeCallback(&RdmaConsensusTransport::HandleSendComplete, this).Bind(peerId, sourcePort),
                                Simulator::GetMaximumSimulationTime());
     }
 
@@ -547,26 +567,45 @@ namespace ns3 {
         }
 
         uint32_t peerId = header.GetSenderId();
-        Deliver(peerId, buffer->Copy());
+        Ptr<Packet> frame = buffer->Copy();
+        if (!m_iorsWireEnabled) {
+            // A nonparticipating receiver gets the original protocol frame at
+            // the RDMA edge, after reassembly and before application delivery.
+            ConsensusMessage decoded;
+            if (ConsensusMessage::FromPacket(frame, decoded) && decoded.iorsPresent) {
+                decoded.iorsPresent = false;
+                frame = decoded.ToPacket();
+            }
+        }
+        Deliver(peerId, frame);
         m_reassembly.erase(key);
         m_driver->m_rdma->DeleteRxQp(sourceIp, priorityGroup, sourcePort);
     }
 
-    void RdmaConsensusTransport::HandleSendComplete(uint16_t sourcePort) {
-        m_sourcePortPeers.erase(sourcePort);
+    void RdmaConsensusTransport::HandleSendComplete(uint32_t peerId, uint16_t sourcePort) {
+        m_sourcePortsInUse.erase({peerId, sourcePort});
+        auto waiting = m_waitingForSourcePort.find(peerId);
+        if (m_running && waiting != m_waitingForSourcePort.end() && !waiting->second.empty()) {
+            PendingSend next = waiting->second.front();
+            waiting->second.pop_front();
+            if (waiting->second.empty()) m_waitingForSourcePort.erase(waiting);
+            Simulator::ScheduleNow(&RdmaConsensusTransport::SendNow, this, peerId, next.packet, next.metadata);
+        }
     }
 
-    uint16_t RdmaConsensusTransport::AllocateSourcePort() {
+    uint16_t RdmaConsensusTransport::AllocateSourcePort(uint32_t peerId) {
         for (uint32_t attempt = 0; attempt < 65535; ++attempt) {
             uint16_t candidate = m_nextSourcePort++;
             if (m_nextSourcePort < 10000) {
                 m_nextSourcePort = 10000;
             }
-            if (candidate != 0 && m_sourcePortPeers.find(candidate) == m_sourcePortPeers.end()) {
+            if (candidate != 0 && m_sourcePortsInUse.find({peerId, candidate}) == m_sourcePortsInUse.end()) {
                 return candidate;
             }
         }
-        NS_ABORT_MSG("RDMA consensus transport exhausted source ports");
+        // Treat port-space exhaustion as transport backpressure. SendNow queues
+        // this message and resumes when a live queue pair completes, allowing
+        // overload to appear as delay/backlog instead of terminating ns-3.
         return 0;
     }
 

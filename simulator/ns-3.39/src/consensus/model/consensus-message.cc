@@ -2,7 +2,14 @@
 
 #include "ns3/log.h"
 
+#include <algorithm>
+
 namespace ns3 {
+
+    namespace {
+        constexpr uint8_t IORS_EXTENSION[4] = {'I', 'O', 'R', 'S'};
+        constexpr uint32_t IORS_EXTENSION_SIZE = 8;
+    }
 
     NS_LOG_COMPONENT_DEFINE("ConsensusMessage");
     NS_OBJECT_ENSURE_REGISTERED(ConsensusHeader);
@@ -222,7 +229,17 @@ namespace ns3 {
     }
 
     Ptr<Packet> ConsensusMessage::ToPacket() const {
-        Ptr<Packet> packet = Create<Packet>(payloadSize);
+        Ptr<Packet> packet = payloadBytes.empty() ? Create<Packet>(payloadSize)
+                                                   : Create<Packet>(payloadBytes.data(), payloadBytes.size());
+        const uint32_t bodySize = packet->GetSize();
+        if (iorsPresent) {
+            uint8_t extension[IORS_EXTENSION_SIZE] = {'I', 'O', 'R', 'S',
+                                                       static_cast<uint8_t>(iorsMarked ? 1 : 0), iorsEvidence,
+                                                       static_cast<uint8_t>(iorsWaited ? 1 : 0), 0};
+            Ptr<Packet> framed = Create<Packet>(extension, IORS_EXTENSION_SIZE);
+            framed->AddAtEnd(packet);
+            packet = framed;
+        }
         ConsensusHeader header;
         header.SetProtocol(protocol);
         header.SetMessageType(type);
@@ -231,7 +248,7 @@ namespace ns3 {
         header.SetView(view);
         header.SetInstanceId(instanceId);
         header.SetMessageId(messageId);
-        header.SetPayloadLength(payloadSize);
+        header.SetPayloadLength(bodySize + (iorsPresent ? IORS_EXTENSION_SIZE : 0));
         header.SetDigest(digest);
         header.SetClientId(clientId);
         header.SetRequestId(requestId);
@@ -256,6 +273,22 @@ namespace ns3 {
             return false;
         }
 
+        message.iorsPresent = false;
+        message.iorsMarked = false;
+        message.iorsEvidence = 0;
+        message.iorsWaited = false;
+        if (copy->GetSize() >= IORS_EXTENSION_SIZE) {
+            uint8_t extension[IORS_EXTENSION_SIZE];
+            copy->CopyData(extension, IORS_EXTENSION_SIZE);
+            if (std::equal(IORS_EXTENSION, IORS_EXTENSION + 4, extension)) {
+                message.iorsPresent = true;
+                message.iorsMarked = (extension[4] & 1) != 0;
+                message.iorsEvidence = extension[5];
+                message.iorsWaited = extension[6] != 0;
+                copy->RemoveAtStart(IORS_EXTENSION_SIZE);
+            }
+        }
+
         message.protocol = header.GetProtocol();
         message.type = header.GetMessageType();
         message.senderId = header.GetSenderId();
@@ -263,7 +296,11 @@ namespace ns3 {
         message.view = header.GetView();
         message.instanceId = header.GetInstanceId();
         message.messageId = header.GetMessageId();
-        message.payloadSize = header.GetPayloadLength();
+        message.payloadSize = copy->GetSize();
+        message.payloadBytes.resize(copy->GetSize());
+        if (!message.payloadBytes.empty()) {
+            copy->CopyData(message.payloadBytes.data(), message.payloadBytes.size());
+        }
         message.digest = header.GetDigest();
         message.clientId = header.GetClientId();
         message.requestId = header.GetRequestId();

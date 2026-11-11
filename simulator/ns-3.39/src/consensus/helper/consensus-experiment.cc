@@ -4,6 +4,7 @@
 
 #include "ns3/abort.h"
 #include "ns3/bidl-application.h"
+#include "ns3/zyzzyva-engine.h"
 #include "ns3/boolean.h"
 #include "ns3/config.h"
 #include "ns3/consensus-application.h"
@@ -56,6 +57,22 @@ namespace ns3 {
     NS_OBJECT_ENSURE_REGISTERED(QbbSwitchPolicy);
 
     namespace {
+
+        void ConfigureIorsSwitches(const ConsensusExperimentConfig& config, ConsensusTopology& topology) {
+            for (uint32_t index = 0; index < topology.switches.GetN(); ++index) {
+                Ptr<SwitchNode> node = DynamicCast<SwitchNode>(topology.switches.Get(index));
+                node->SetAttribute("IorsMode", UintegerValue(config.iorsMode));
+                node->SetAttribute("IorsDetectOnly", BooleanValue(config.iorsDetectOnly));
+                node->SetAttribute("IorsCapacity", UintegerValue(config.iorsCapacity));
+                node->SetAttribute("IorsFingerprintBits", UintegerValue(config.iorsFingerprintBits));
+                node->SetAttribute("IorsHoldCapacity", UintegerValue(config.iorsHoldCapacity));
+                node->SetAttribute("IorsTtl", TimeValue(MicroSeconds(config.iorsTtlUs)));
+                node->SetAttribute("IorsFixedWait", TimeValue(MicroSeconds(config.iorsFixedWaitUs)));
+                node->SetAttribute("IorsMaxWait", TimeValue(MicroSeconds(config.iorsMaxWaitUs)));
+                node->SetAttribute("IorsZyzReplicaCount", UintegerValue(config.replicaCount));
+                node->SetAttribute("IorsBidlOrdererCount", UintegerValue(config.architecture == "bidl" && config.bidlNativeSequencing ? config.replicaCount : 0));
+            }
+        }
 
         std::string Trim(const std::string& value) {
             auto first = std::find_if_not(value.begin(), value.end(), [](unsigned char character) { return std::isspace(character); });
@@ -585,6 +602,20 @@ namespace ns3 {
             transport = "rdma";
             topology = "qbb-leaf-spine";
             queueDisc = "none";
+        } else if (name == "zyzzyva-rdma") {
+            architecture = "zyzzyva";
+            scenario = "zyzzyva-rdma";
+            engine = "zyzzyva";
+            transport = "rdma";
+            topology = "qbb-leaf-spine";
+            queueDisc = "none";
+        } else if (name == "ezbft-rdma") {
+            architecture = "ezbft";
+            scenario = "ezbft-rdma";
+            engine = "ezbft";
+            transport = "rdma";
+            topology = "qbb-leaf-spine";
+            queueDisc = "none";
         } else {
             throw std::invalid_argument("unknown consensus preset: " + name);
         }
@@ -609,13 +640,13 @@ namespace ns3 {
     }
 
     std::vector<std::string> ConsensusExperimentConfig::GetAvailablePresets() {
-        return {"pbft-tcp", "pbft-rdma", "bidl-tcp", "bidl-rdma"};
+        return {"pbft-tcp", "pbft-rdma", "bidl-tcp", "bidl-rdma", "zyzzyva-rdma"};
     }
 
     void ConsensusExperimentConfig::AddCommandLineOptions(CommandLine& command) {
         command.AddValue("preset", "Built-in experiment preset", preset);
         command.AddValue("configFile", "key=value experiment configuration file", configFile);
-        command.AddValue("architecture", "Application architecture: replicated or bidl", architecture);
+        command.AddValue("architecture", "Application architecture: replicated, bidl, or zyzzyva", architecture);
         command.AddValue("bidlIngressMode", "BIDL ingress: direct or network", bidlIngressMode);
         command.AddValue("workload", "Workload mode: auto, open-loop, closed-loop, burst, or trace", workload);
         command.AddValue("workloadProvider", "Optional ns-3 TypeId implementing ConsensusWorkloadProvider", workloadProvider);
@@ -690,6 +721,32 @@ namespace ns3 {
         command.AddValue("rdmaCcMode", "ns3-datacenter RDMA congestion-control mode", rdmaCcMode);
         command.AddValue("rdmaPriorityGroup", "Priority group used by consensus RDMA QPs", rdmaPriorityGroup);
         command.AddValue("rdmaMtu", "RDMA payload MTU in bytes", rdmaMtu);
+        command.AddValue("iorsMode", "IORS: 0=off, 1=mark, 2=fixed wait, 3=RTT wait", iorsMode);
+        command.AddValue("iorsDetectOnly", "Observe conflicts without marking packets", iorsDetectOnly);
+        command.AddValue("zyzzyvaRecoveryRule", "0=original Zyzzyva, 1=Velma", zyzzyvaRecoveryRule);
+        command.AddValue("zyzzyvaEquivocationEnabled", "Inject primary ORDER-REQ equivocation", zyzzyvaEquivocationEnabled);
+        command.AddValue("zyzzyvaViewChangeEnabled", "Enable Zyzzyva view change (false is an ablation)", zyzzyvaViewChangeEnabled);
+        command.AddValue("zyzzyvaEquivocationTarget", "Replica ID receiving the first conflicting ORDER-REQ", zyzzyvaEquivocationTarget);
+        command.AddValue("zyzzyvaEquivocationDelayUs", "Canonical ORDER-REQ delay to attacked replica", zyzzyvaEquivocationDelayUs);
+        command.AddValue("zyzzyvaEquivocationStartSequence", "First sequence number at which equivocation is injected", zyzzyvaEquivocationStartSequence);
+        command.AddValue("zyzzyvaEquivocationPlan", "Semicolon-separated view,primary,absolute-seconds,target attacks", zyzzyvaEquivocationPlan);
+        command.AddValue("zyzzyvaMaliciousReplicaIds", "Replica IDs permitted to equivocate and excluded from correct-replica agreement checks", zyzzyvaMaliciousReplicaIds);
+        command.AddValue("bidlNativeSequencing", "Sequence at the current PBFT orderer leader; use ingress as gateway", bidlNativeSequencing);
+        command.AddValue("bidlCompactOrderNotifications", "Send hashes normally and fetch full BIDL contents only on mismatch", bidlCompactOrderNotifications);
+        command.AddValue("bidlAttackMode", "0=colluding client content; 1=unsigned sequence tampering", bidlAttackMode);
+        command.AddValue("ezbftVariant", "0=original EZBFT, 1=research PBFT-confirmed variant", ezbftVariant);
+        command.AddValue("ezbftEquivocationEnabled", "Inject conflicting EZBFT owner proposals", ezbftEquivocationEnabled);
+        command.AddValue("ezbftEquivocationTarget", "Replica receiving first conflicting EZBFT proposal", ezbftEquivocationTarget);
+        command.AddValue("ezbftEquivocationDelayUs", "Delay before canonical EZBFT proposal", ezbftEquivocationDelayUs);
+        command.AddValue("iorsCapacity", "Candidate bindings per switch", iorsCapacity);
+        command.AddValue("iorsFingerprintBits", "Key fingerprint bits (1..64)", iorsFingerprintBits);
+        command.AddValue("iorsHoldCapacity", "Packets held per switch", iorsHoldCapacity);
+        command.AddValue("iorsTtlUs", "Candidate lifetime in microseconds", iorsTtlUs);
+        command.AddValue("iorsFixedWaitUs", "Fixed IORS wait in microseconds", iorsFixedWaitUs);
+        command.AddValue("iorsMaxWaitUs", "Maximum IORS wait in microseconds", iorsMaxWaitUs);
+        command.AddValue("iorsTerminalGate", "Enable terminal speculative gate", iorsTerminalGate);
+        command.AddValue("iorsGateTimeoutUs", "Terminal gate fallback timeout in microseconds", iorsGateTimeoutUs);
+        command.AddValue("bidlDenylistEnabled", "Enable BIDL client denylist", bidlDenylistEnabled);
         command.AddValue("rdmaAckInterval", "RDMA L2 ACK interval in packets", rdmaAckInterval);
         command.AddValue("rdmaL2ChunkSize", "RDMA L2 chunk size in bytes", rdmaL2ChunkSize);
         command.AddValue("rdmaWindow", "Maximum RDMA bytes in flight; zero uses CC defaults", rdmaWindow);
@@ -757,11 +814,12 @@ namespace ns3 {
         command.AddValue("seed", "ns-3 random seed", seed);
         command.AddValue("run", "ns-3 independent run number", run);
         command.AddValue("outputPrefix", "Prefix for JSON and CSV result files", outputPrefix);
+        command.AddValue("diagnosticEvents", "Retain all candidate traces; default retains marked and conflicting candidates", diagnosticEvents);
     }
 
     void ConsensusExperimentConfig::Validate() const {
-        if (architecture != "replicated" && architecture != "bidl") {
-            throw std::invalid_argument("architecture must be replicated or bidl");
+        if (architecture != "replicated" && architecture != "bidl" && architecture != "zyzzyva" && architecture != "ezbft") {
+            throw std::invalid_argument("architecture must be replicated, bidl, zyzzyva, or ezbft");
         }
         if (bidlIngressMode != "direct" && bidlIngressMode != "network") {
             throw std::invalid_argument("bidlIngressMode must be direct or network");
@@ -780,6 +838,22 @@ namespace ns3 {
         }
         if (replicaCount == 0 || faultTolerance >= replicaCount) {
             throw std::invalid_argument("replica and fault counts are inconsistent");
+        }
+        if (architecture == "zyzzyva") {
+            const auto malicious = ParseIdList(zyzzyvaMaliciousReplicaIds);
+            if (malicious.size() > faultTolerance ||
+                std::any_of(malicious.begin(), malicious.end(), [&](uint32_t id) { return id >= replicaCount; })) {
+                throw std::invalid_argument("Zyzzyva malicious replica IDs must be valid and no more than f");
+            }
+        }
+        if (iorsMode > 3 || zyzzyvaRecoveryRule > 1 || iorsCapacity == 0 ||
+            iorsFingerprintBits == 0 || iorsFingerprintBits > 64 || iorsTtlUs <= 0.0 ||
+            zyzzyvaEquivocationDelayUs < 0.0 || iorsFixedWaitUs < 0.0 ||
+            iorsMaxWaitUs < 0.0 || iorsGateTimeoutUs <= 0.0) {
+            throw std::invalid_argument("invalid IORS configuration");
+        }
+        if (iorsMode > 0 && !UsesRdmaNetwork()) {
+            throw std::invalid_argument("IORS requires RDMA transport");
         }
         if (requestRate <= 0.0 || requestTimeoutMs <= 0.0 || retransmissionTimeoutMs <= 0.0 || viewChangeTimeoutMs <= 0.0 ||
             batchTimeoutMs <= 0.0 || simulationTime <= 0.0 || applicationStartTime < 0.0 || warmupTime < 0.0 ||
@@ -807,12 +881,20 @@ namespace ns3 {
             throw std::invalid_argument("warmup, measurement, and cooldown times do not fit simulationTime");
         }
         const bool pbftEngine = engine == "pbft" || engine == "ns3::PbftEngine";
+        const bool zyzzyvaEngine = engine == "zyzzyva" || engine == "ns3::ZyzzyvaEngine";
+        const bool ezbftEngine = engine == "ezbft" || engine == "ns3::EzBftEngine";
         const bool tcpTransport = transport == "tcp" || transport == "ns3::TcpConsensusTransport";
         const bool rdmaTransport = transport == "rdma" || transport == "ns3::RdmaConsensusTransport";
         const bool tcpTopology = topology == "csma" || topology == "leaf-spine";
         const bool rdmaTopology = topology == "qbb-star" || topology == "qbb-leaf-spine" || topology == "qbb-file";
-        if (!pbftEngine) {
+        if (!pbftEngine && !zyzzyvaEngine && !ezbftEngine) {
             throw std::invalid_argument("unsupported consensus engine: " + engine);
+        }
+        if ((architecture == "zyzzyva") != zyzzyvaEngine) {
+            throw std::invalid_argument("Zyzzyva architecture requires the Zyzzyva engine");
+        }
+        if ((architecture == "ezbft") != ezbftEngine || ezbftVariant > 1 || ezbftEquivocationDelayUs < 0.0) {
+            throw std::invalid_argument("EZBFT architecture requires a valid EZBFT engine configuration");
         }
         if (!tcpTransport && !rdmaTransport) {
             throw std::invalid_argument("unsupported consensus transport: " + transport);
@@ -911,18 +993,49 @@ namespace ns3 {
     void ConsensusExperimentConfig::ConfigureHelper(ConsensusHelper& helper, const ConsensusTopology* topologyResult) const {
         Validate();
         helper.SetEngine(GetEngineType());
-        helper.SetEngineAttribute("PrimaryId", UintegerValue(0));
         helper.SetEngineAttribute("FaultTolerance", UintegerValue(faultTolerance));
-        helper.SetEngineAttribute("RetransmissionTimeout", TimeValue(MilliSeconds(retransmissionTimeoutMs)));
-        helper.SetEngineAttribute("InstanceTimeout", TimeValue(MilliSeconds(viewChangeTimeoutMs)));
-        helper.SetEngineAttribute("MessageProcessingTime", TimeValue(MicroSeconds(pbftMessageProcessingUs)));
-        helper.SetEngineAttribute("PrePrepareProcessingTime", TimeValue(MicroSeconds(pbftPrePrepareProcessingUs)));
-        helper.SetEngineAttribute("PrepareProcessingTime", TimeValue(MicroSeconds(pbftPrepareProcessingUs)));
-        helper.SetEngineAttribute("CommitProcessingTime", TimeValue(MicroSeconds(pbftCommitProcessingUs)));
-        helper.SetEngineAttribute("ViewChangeProcessingTime", TimeValue(MicroSeconds(pbftViewChangeProcessingUs)));
+        if (architecture != "ezbft")
+            helper.SetEngineAttribute("InstanceTimeout", TimeValue(MilliSeconds(viewChangeTimeoutMs)));
+        if (architecture == "zyzzyva") {
+            helper.SetEngineAttribute("RecoveryRule", UintegerValue(zyzzyvaRecoveryRule));
+            helper.SetEngineAttribute("RequireClientAuthentication", BooleanValue(true));
+            helper.SetApplicationAttribute("VerificationTime", TimeValue(MicroSeconds(transactionVerificationUs)));
+            helper.SetEngineAttribute("IorsTerminalGate", BooleanValue(iorsTerminalGate));
+            helper.SetEngineAttribute("IorsGateTimeout", TimeValue(MicroSeconds(iorsGateTimeoutUs)));
+            helper.SetEngineAttribute("EquivocationEnabled", BooleanValue(zyzzyvaEquivocationEnabled));
+            helper.SetEngineAttribute("MaliciousReplicaIds", StringValue(zyzzyvaMaliciousReplicaIds));
+            helper.SetEngineAttribute("ViewChangeEnabled", BooleanValue(zyzzyvaViewChangeEnabled));
+            helper.SetEngineAttribute("EquivocationTarget", UintegerValue(zyzzyvaEquivocationTarget));
+            helper.SetEngineAttribute("EquivocationDelay", TimeValue(MicroSeconds(zyzzyvaEquivocationDelayUs)));
+            helper.SetEngineAttribute("EquivocationStartSequence", UintegerValue(zyzzyvaEquivocationStartSequence));
+            helper.SetEngineAttribute("EquivocationPlan", StringValue(zyzzyvaEquivocationPlan));
+            helper.SetEngineAttribute("ExecutionTimePerTransaction", TimeValue(MicroSeconds(executionTimePerTransactionUs)));
+            helper.SetEngineAttribute("RollbackTimePerTransaction", TimeValue(MicroSeconds(executionTimePerTransactionUs)));
+            helper.SetResourceAttribute("Mode", EnumValue(RESOURCE_QUEUED));
+            helper.SetClientAttribute("ZyzzyvaClient", BooleanValue(true));
+            helper.SetClientAttribute("RequirePrimaryProofs", BooleanValue(true));
+        } else if (architecture == "ezbft") {
+            helper.SetEngineAttribute("Variant", UintegerValue(ezbftVariant));
+            helper.SetEngineAttribute("IorsTerminalGate", BooleanValue(iorsTerminalGate));
+            helper.SetEngineAttribute("IorsGateTimeout", TimeValue(MicroSeconds(iorsGateTimeoutUs)));
+            helper.SetEngineAttribute("EquivocationEnabled", BooleanValue(ezbftEquivocationEnabled));
+            helper.SetEngineAttribute("EquivocationTarget", UintegerValue(ezbftEquivocationTarget));
+            helper.SetEngineAttribute("EquivocationDelay", TimeValue(MicroSeconds(ezbftEquivocationDelayUs)));
+            helper.SetEngineAttribute("OwnerTimeout", TimeValue(MilliSeconds(viewChangeTimeoutMs)));
+            helper.SetClientAttribute("EzBftClient", BooleanValue(true));
+        } else {
+            helper.SetEngineAttribute("PrimaryId", UintegerValue(0));
+            helper.SetEngineAttribute("RetransmissionTimeout", TimeValue(MilliSeconds(retransmissionTimeoutMs)));
+            helper.SetEngineAttribute("MessageProcessingTime", TimeValue(MicroSeconds(pbftMessageProcessingUs)));
+            helper.SetEngineAttribute("PrePrepareProcessingTime", TimeValue(MicroSeconds(pbftPrePrepareProcessingUs)));
+            helper.SetEngineAttribute("PrepareProcessingTime", TimeValue(MicroSeconds(pbftPrepareProcessingUs)));
+            helper.SetEngineAttribute("CommitProcessingTime", TimeValue(MicroSeconds(pbftCommitProcessingUs)));
+            helper.SetEngineAttribute("ViewChangeProcessingTime", TimeValue(MicroSeconds(pbftViewChangeProcessingUs)));
+        }
 
         helper.SetTransport(GetTransportType());
         if (UsesRdmaNetwork()) {
+            helper.SetTransportAttribute("IorsWireEnabled", BooleanValue(iorsMode > 0 || iorsTerminalGate || iorsDetectOnly));
             helper.SetTransportAttribute("PriorityGroup", UintegerValue(GetConsensusPriorityGroup()));
             helper.SetTransportAttribute("Window", UintegerValue(rdmaWindow));
             uint64_t baseRtt = topologyResult && topologyResult->maxRttNs > 0 ? topologyResult->maxRttNs
@@ -946,6 +1059,10 @@ namespace ns3 {
         helper.SetClientAttribute("RequestTimeout", TimeValue(MilliSeconds(requestTimeoutMs)));
         helper.SetClientAttribute("AutoGenerate", BooleanValue(false));
         helper.SetBidlAttribute("FaultTolerance", UintegerValue(faultTolerance));
+        helper.SetBidlAttribute("NativeSequencing", BooleanValue(bidlNativeSequencing));
+        helper.SetBidlAttribute("CompactOrderNotifications", BooleanValue(bidlCompactOrderNotifications));
+        helper.SetBidlAttribute("AttackMode", UintegerValue(bidlAttackMode));
+        helper.SetBidlAttribute("SequencerTimeout", TimeValue(MilliSeconds(viewChangeTimeoutMs)));
         helper.SetBidlAttribute("BatchSize", UintegerValue(batchSize));
         helper.SetBidlAttribute("BatchTimeout", TimeValue(MilliSeconds(batchTimeoutMs)));
         helper.SetBidlAttribute("SequencerServiceTime", TimeValue(MicroSeconds(sequencerServiceUs)));
@@ -960,6 +1077,9 @@ namespace ns3 {
         helper.SetBidlAttribute("AttackStop", TimeValue(MilliSeconds(bidlAttackStopMs)));
         helper.SetBidlAttribute("AttackProcessingTime", TimeValue(MicroSeconds(bidlAttackProcessingUs)));
         helper.SetBidlAttribute("AttackTargetExecutors", UintegerValue(bidlAttackTargetExecutors));
+        helper.SetBidlAttribute("IorsTerminalGate", BooleanValue(iorsTerminalGate));
+        helper.SetBidlAttribute("IorsGateTimeout", TimeValue(MicroSeconds(iorsGateTimeoutUs)));
+        helper.SetBidlAttribute("DenylistEnabled", BooleanValue(bidlDenylistEnabled));
         helper.SetResourceAttribute("CpuCores", UintegerValue(resourceCpuCores));
         helper.SetResourceAttribute("StorageChannels", UintegerValue(resourceStorageChannels));
     }
@@ -967,6 +1087,12 @@ namespace ns3 {
     std::string ConsensusExperimentConfig::GetEngineType() const {
         if (engine == "pbft" || engine == "ns3::PbftEngine") {
             return "ns3::PbftEngine";
+        }
+        if (engine == "zyzzyva" || engine == "ns3::ZyzzyvaEngine") {
+            return "ns3::ZyzzyvaEngine";
+        }
+        if (engine == "ezbft" || engine == "ns3::EzBftEngine") {
+            return "ns3::EzBftEngine";
         }
         throw std::invalid_argument("unsupported consensus engine: " + engine);
     }
@@ -1040,6 +1166,32 @@ namespace ns3 {
                << "  \"consensus_software_time_per_block_us\": " << consensusSoftwareTimePerBlockUs << ",\n"
                << "  \"commit_processing_time_per_block_us\": " << commitProcessingTimePerBlockUs << ",\n"
                << "  \"bidl_attack_enabled\": " << (bidlAttackEnabled ? "true" : "false") << ",\n"
+               << "  \"bidl_denylist_enabled\": " << (bidlDenylistEnabled ? "true" : "false") << ",\n"
+               << "  \"zyzzyva_recovery_rule\": " << zyzzyvaRecoveryRule << ",\n"
+               << "  \"zyzzyva_equivocation_enabled\": " << (zyzzyvaEquivocationEnabled ? "true" : "false") << ",\n"
+               << "  \"zyzzyva_equivocation_plan\": \"" << zyzzyvaEquivocationPlan << "\",\n"
+               << "  \"zyzzyva_malicious_replica_ids\": \"" << zyzzyvaMaliciousReplicaIds << "\",\n"
+               << "  \"diagnostic_events\": " << (diagnosticEvents ? "true" : "false") << ",\n"
+               << "  \"zyzzyva_view_change_enabled\": " << (zyzzyvaViewChangeEnabled ? "true" : "false") << ",\n"
+               << "  \"ezbft_variant\": " << ezbftVariant << ",\n"
+               << "  \"ezbft_variant_name\": \"" << (ezbftVariant == 0 ? "original" : "research-pbft-finalization") << "\",\n"
+               << "  \"ezbft_equivocation_enabled\": " << (ezbftEquivocationEnabled ? "true" : "false") << ",\n"
+               << "  \"zyzzyva_equivocation_target\": " << zyzzyvaEquivocationTarget << ",\n"
+               << "  \"zyzzyva_equivocation_delay_us\": " << zyzzyvaEquivocationDelayUs << ",\n"
+               << "  \"zyzzyva_equivocation_start_sequence\": " << zyzzyvaEquivocationStartSequence << ",\n"
+               << "  \"bidl_native_sequencing\": " << (bidlNativeSequencing ? "true" : "false") << ",\n"
+               << "  \"bidl_compact_order_notifications\": " << (bidlCompactOrderNotifications ? "true" : "false") << ",\n"
+               << "  \"bidl_attack_mode\": " << bidlAttackMode << ",\n"
+               << "  \"iors_mode\": " << iorsMode << ",\n"
+               << "  \"iors_detect_only\": " << (iorsDetectOnly ? "true" : "false") << ",\n"
+               << "  \"iors_capacity\": " << iorsCapacity << ",\n"
+               << "  \"iors_fingerprint_bits\": " << iorsFingerprintBits << ",\n"
+               << "  \"iors_hold_capacity\": " << iorsHoldCapacity << ",\n"
+               << "  \"iors_ttl_us\": " << iorsTtlUs << ",\n"
+               << "  \"iors_fixed_wait_us\": " << iorsFixedWaitUs << ",\n"
+               << "  \"iors_max_wait_us\": " << iorsMaxWaitUs << ",\n"
+               << "  \"iors_terminal_gate\": " << (iorsTerminalGate ? "true" : "false") << ",\n"
+               << "  \"iors_gate_timeout_us\": " << iorsGateTimeoutUs << ",\n"
                << "  \"bidl_malicious_node_count\": " << bidlMaliciousNodeCount << ",\n"
                << "  \"bidl_attack_target_executors\": " << bidlAttackTargetExecutors << ",\n"
                << "  \"bidl_attack_probability\": " << bidlAttackProbability << ",\n"
@@ -1617,6 +1769,7 @@ namespace ns3 {
                     hardware->AddTableEntry(route.first, route.second);
                 }
             }
+            ConfigureIorsSwitches(*this, result);
             return result;
         }
         if (topology != "qbb-star" && topology != "qbb-leaf-spine") {
@@ -1771,6 +1924,7 @@ namespace ns3 {
                 }
             }
         }
+        ConfigureIorsSwitches(*this, result);
         return result;
     }
 
@@ -2000,30 +2154,76 @@ namespace ns3 {
         m_measurementStop = stop;
     }
 
+    void ConsensusStatistics::SetEventOutputPrefix(const std::string& prefix) {
+        if (prefix.empty()) return;
+        m_bidlAttackEventStream.open(prefix + "-bidl-attack-events.csv", std::ios::out | std::ios::trunc);
+        m_bidlReexecutionEventStream.open(prefix + "-bidl-reexecution-events.csv", std::ios::out | std::ios::trunc);
+        m_candidateEventStream.open(prefix + "-candidate-events.csv", std::ios::out | std::ios::trunc);
+        if (!m_bidlAttackEventStream || !m_bidlReexecutionEventStream || !m_candidateEventStream)
+            throw std::runtime_error("cannot open BIDL terminal event output");
+        m_bidlAttackEventStream << "time_us,node_id,sequence,targeted_messages,bytes\n";
+        m_bidlReexecutionEventStream << "time_us,node_id,block_id,transactions,elapsed_us\n";
+        m_bidlPathStream.open(prefix + "-transaction-path.csv", std::ios::out | std::ios::trunc);
+        if (!m_bidlPathStream) throw std::runtime_error("cannot open transaction path event output");
+        m_bidlPathStream << "direction,sender_id,receiver_id,message_type,sequence_number,bytes,time_us,message_id,view,client_id,request_id,digest,time_ns\n";
+        m_finalizedStream.open(prefix + "-transaction-finalized.csv");
+        m_backgroundEventStream.open(prefix + "-background-events.csv");
+        m_replicaBacklogStream.open(prefix + "-replica-backlog.csv");
+        if (!m_finalizedStream || !m_backgroundEventStream || !m_replicaBacklogStream)
+            throw std::runtime_error("cannot open evaluation event outputs");
+        m_finalizedStream << "time_ns,node_id,sequence_number,block_id,client_id,request_id,transaction_count\n";
+        m_backgroundEventStream << "event,time_ns,sender_id,receiver_id,flow_id,bytes,fct_ns\n";
+        m_replicaBacklogStream << "time_ns,node_id,view,verification_messages,execution_transactions,buffered_orders,recovering\n";
+        m_bidlLiveProgressStream.open(prefix + "-bidl-progress.csv", std::ios::out | std::ios::trunc);
+        if (!m_bidlLiveProgressStream) throw std::runtime_error("cannot open BIDL progress output");
+        m_bidlLiveProgressStream << "time_us,node_id,verification_backlog,execution_backlog,total_backlog,completed_requests\n";
+        m_candidateEventStream << "schema_version,time_us,phase,sender_id,receiver_id,type,view,instance,digest,iors_marked,client_id,request_id\n";
+    }
+
+    void ConsensusStatistics::RecordCandidateEvent(const CandidateEventSample& event) {
+        if (m_candidateEventStream.is_open()) {
+            m_candidateEventStream << "2," << event.time.GetMicroSeconds() << ',' << static_cast<uint32_t>(event.phase) << ','
+                << event.senderId << ',' << event.receiverId << ',' << event.type << ',' << event.view << ','
+                << event.instanceId << ',' << event.digest << ',' << static_cast<uint32_t>(event.marked) << ','
+                << event.clientId << ',' << event.requestId << '\n';
+        }
+    }
+
     void ConsensusStatistics::AttachClient(Ptr<ConsensusClientApplication> client) {
         if (!client) {
             return;
         }
         m_clients.push_back(client);
-        client->TraceConnectWithoutContext("RequestSubmitted", MakeCallback(&ConsensusStatistics::OnRequestSubmitted, this));
-        client->TraceConnectWithoutContext("RequestCompleted", MakeCallback(&ConsensusStatistics::OnRequestCompleted, this));
+        client->TraceConnectWithoutContext("MessageTx", MakeCallback(&ConsensusStatistics::OnBidlMessageTx, this));
+        client->TraceConnectWithoutContext("MessageRx", MakeCallback(&ConsensusStatistics::OnBidlMessageRx, this));
+        client->TraceConnectWithoutContext("MessageEvent", MakeCallback(&ConsensusStatistics::OnMessageEvent, this));
+        client->TraceConnectWithoutContext("RequestSubmitted", MakeCallback(&ConsensusStatistics::OnRequestSubmitted, this).Bind(PeekPointer(client)));
+        client->TraceConnectWithoutContext("RequestCompleted", MakeCallback(&ConsensusStatistics::OnRequestCompleted, this).Bind(PeekPointer(client)));
+        client->TraceConnectWithoutContext("RequestAborted", MakeCallback(&ConsensusStatistics::OnRequestAborted, this));
         client->TraceConnectWithoutContext("RequestRetransmitted", MakeCallback(&ConsensusStatistics::OnRequestRetransmitted, this));
         client->TraceConnectWithoutContext("RequestTimedOut", MakeCallback(&ConsensusStatistics::OnRequestTimedOut, this));
     }
 
     void ConsensusStatistics::AttachReplicas(const ApplicationContainer& applications) {
+        Simulator::Schedule(MilliSeconds(10), &ConsensusStatistics::SampleReplicaBacklog, this);
         for (uint32_t index = 0; index < applications.GetN(); ++index) {
             Ptr<ConsensusApplication> application = DynamicCast<ConsensusApplication>(applications.Get(index));
             if (!application) {
                 continue;
             }
-            application->TraceConnectWithoutContext("MessageTx", MakeCallback(&ConsensusStatistics::OnMessage, this));
+            application->TraceConnectWithoutContext("MessageTx", MakeCallback(&ConsensusStatistics::OnBidlMessageTx, this));
+            application->TraceConnectWithoutContext("MessageRx", MakeCallback(&ConsensusStatistics::OnBidlMessageRx, this));
+        application->TraceConnectWithoutContext("MessageEvent", MakeCallback(&ConsensusStatistics::OnMessageEvent, this));
+            application->TraceConnectWithoutContext("CandidateEvent", MakeCallback(&ConsensusStatistics::OnCandidate, this));
             application->TraceConnectWithoutContext("Decision", MakeCallback(&ConsensusStatistics::OnDecision, this));
 
+            m_replicaApplications.push_back(application);
             Ptr<ConsensusEngine> engine = application->GetEngine();
             if (engine) {
                 engine->TraceConnectWithoutContext("LeaderChanged", MakeCallback(&ConsensusStatistics::OnViewChanged, this));
                 engine->TraceConnectWithoutContext("ProtocolPhase", MakeCallback(&ConsensusStatistics::OnEnginePhase, this));
+                if (DynamicCast<ZyzzyvaEngine>(engine))
+                    engine->TraceConnectWithoutContext("CandidateExecution", MakeCallback(&ConsensusStatistics::OnCandidate, this));
             }
         }
     }
@@ -2035,12 +2235,14 @@ namespace ns3 {
                 continue;
             }
             m_bidlApplications.push_back(application);
-            application->TraceConnectWithoutContext("MessageTx", MakeCallback(&ConsensusStatistics::OnMessage, this));
+            application->TraceConnectWithoutContext("CandidateEvent", MakeCallback(&ConsensusStatistics::OnCandidate, this));
             application->TraceConnectWithoutContext("MessageTx", MakeCallback(&ConsensusStatistics::OnBidlMessageTx, this));
             application->TraceConnectWithoutContext("MessageRx", MakeCallback(&ConsensusStatistics::OnBidlMessageRx, this));
+        application->TraceConnectWithoutContext("MessageEvent", MakeCallback(&ConsensusStatistics::OnMessageEvent, this));
             application->TraceConnectWithoutContext("PhaseChanged", MakeCallback(&ConsensusStatistics::OnBidlPhase, this));
             application->TraceConnectWithoutContext("BatchCreated", MakeCallback(&ConsensusStatistics::OnBidlBatch, this));
             application->TraceConnectWithoutContext("BlockCommitted", MakeCallback(&ConsensusStatistics::OnBidlCommit, this));
+            application->TraceConnectWithoutContext("TransactionFinalized", MakeCallback(&ConsensusStatistics::OnTransactionFinalized, this));
             application->TraceConnectWithoutContext("TransactionCommitted", MakeCallback(&ConsensusStatistics::OnBidlTransactionCommit, this));
             application->TraceConnectWithoutContext("BlockCommitTime", MakeCallback(&ConsensusStatistics::OnBidlBlockCommitTime, this));
             application->TraceConnectWithoutContext("ExecutionBacklog", MakeCallback(&ConsensusStatistics::OnExecutionBacklog, this));
@@ -2048,6 +2250,7 @@ namespace ns3 {
             application->TraceConnectWithoutContext("ConflictRejected",
                                                     MakeCallback(&ConsensusStatistics::OnBidlConflictRejected, this));
             application->TraceConnectWithoutContext("BlockReexecution", MakeCallback(&ConsensusStatistics::OnBidlReexecution, this));
+            application->TraceConnectWithoutContext("RepairTx", MakeCallback(&ConsensusStatistics::OnBidlRepairTx, this));
             Ptr<ConsensusEngine> engine = application->GetEngine();
             if (engine) {
                 engine->TraceConnectWithoutContext("LeaderChanged", MakeCallback(&ConsensusStatistics::OnViewChanged, this));
@@ -2060,6 +2263,7 @@ namespace ns3 {
         for (uint32_t index = 0; index < applications.GetN(); ++index) {
             Ptr<RdmaWorkloadApplication> application = DynamicCast<RdmaWorkloadApplication>(applications.Get(index));
             if (application) {
+                application->TraceConnectWithoutContext("FlowStarted", MakeCallback(&ConsensusStatistics::OnBackgroundFlowStarted, this));
                 application->TraceConnectWithoutContext("FlowCompleted",
                                                         MakeCallback(&ConsensusStatistics::OnBackgroundFlowCompleted, this));
             }
@@ -2111,12 +2315,27 @@ namespace ns3 {
         m_switchPolicies = policies;
     }
 
+    void ConsensusStatistics::AttachIorsSwitches(const NodeContainer& switches) {
+        for (uint32_t index = 0; index < switches.GetN(); ++index) {
+            Ptr<SwitchNode> node = DynamicCast<SwitchNode>(switches.Get(index));
+            if (node) node->TraceConnectWithoutContext("IorsConflict", MakeCallback(&ConsensusStatistics::OnIorsConflict, this));
+        }
+    }
+
+    void ConsensusStatistics::OnIorsConflict(uint32_t switchId, uint8_t protocol, uint32_t senderId, uint64_t epoch,
+                                               uint64_t instance, uint64_t digest, uint8_t evidence, Time time) {
+        m_iorsEvents.push_back({switchId, protocol, senderId, epoch, instance, digest, evidence, time});
+    }
+
     uint64_t ConsensusStatistics::GetCompletedRequests() const {
         return m_completedRequests;
     }
 
     uint64_t ConsensusStatistics::GetMeasuredRequests() const {
-        return m_requestSamples.size();
+        if (m_clients.empty()) return m_requestSamples.size();
+        return std::count_if(m_completionTimes.begin(), m_completionTimes.end(), [this](const auto& completed) {
+            return completed.second >= m_measurementStart && completed.second < m_measurementStop;
+        });
     }
 
     uint64_t ConsensusStatistics::GetCompletedTransactions() const {
@@ -2124,7 +2343,7 @@ namespace ns3 {
         for (const auto& client : m_clients) {
             total += client->GetCompletedTransactions();
         }
-        if (total == 0) {
+        if (m_clients.empty()) {
             if (!m_committedBidlSequences.empty()) {
                 return m_committedBidlSequences.size();
             }
@@ -2153,7 +2372,7 @@ namespace ns3 {
     }
 
     uint64_t ConsensusStatistics::GetViewChanges() const {
-        return m_views.size();
+        return std::count_if(m_views.begin(), m_views.end(), [](uint64_t view) { return view > 0; });
     }
 
     double ConsensusStatistics::GetRequestThroughput() const {
@@ -2179,10 +2398,22 @@ namespace ns3 {
 
     double ConsensusStatistics::GetWindowTransactionThroughput() const {
         Time duration = m_measurementStop - m_measurementStart;
-        if (duration.IsZero()) {
+        if (!duration.IsPositive()) {
             return 0.0;
         }
-        return static_cast<double>(GetCompletedTransactions()) / duration.GetSeconds();
+        uint64_t completedTransactions = 0;
+        if (!m_clients.empty()) {
+            for (const auto& completed : m_completionTimes) {
+                if (completed.second >= m_measurementStart && completed.second < m_measurementStop)
+                    completedTransactions += m_requestTransactionCounts.at(completed.first);
+            }
+        } else {
+            // Direct ingress has no client acknowledgements; count unique committed sequences.
+            for (const auto& committed : m_bidlTransactionCommitSamples)
+                if (committed.second.commitTime >= m_measurementStart && committed.second.commitTime < m_measurementStop)
+                    ++completedTransactions;
+        }
+        return static_cast<double>(completedTransactions) / duration.GetSeconds();
     }
 
     double ConsensusStatistics::GetLatencyPercentile(double percentile) const {
@@ -2217,6 +2448,15 @@ namespace ns3 {
     }
 
     void ConsensusStatistics::WriteResults(const std::string& outputPrefix, const ConsensusExperimentConfig& config) const {
+        if (m_bidlLiveProgressStream.is_open()) m_bidlLiveProgressStream.flush();
+        if (m_bidlAttackEventStream.is_open()) {
+            m_bidlAttackEventStream.flush();
+            m_bidlAttackEventStream.close();
+        }
+        if (m_bidlReexecutionEventStream.is_open()) {
+            m_bidlReexecutionEventStream.flush();
+            m_bidlReexecutionEventStream.close();
+        }
         config.WriteJson(outputPrefix + "-config.json");
 
         std::ofstream summary(outputPrefix + "-summary.csv");
@@ -2224,15 +2464,19 @@ namespace ns3 {
         std::ofstream transactionLatency(outputPrefix + "-transaction-latency.csv");
         std::ofstream transactionCommit(outputPrefix + "-transaction-commit.csv");
         std::ofstream blockCommit(outputPrefix + "-block-commit.csv");
+        m_finalizedStream.flush();
+        m_backgroundEventStream.flush();
+        m_replicaBacklogStream.flush();
         std::ofstream backlog(outputPrefix + "-executor-backlog.csv");
-        std::ofstream bidlPath(outputPrefix + "-transaction-path.csv");
         std::ofstream phases(outputPrefix + "-phases.csv");
         std::ofstream messages(outputPrefix + "-messages.csv");
         std::ofstream network(outputPrefix + "-network.csv");
         std::ofstream queues(outputPrefix + "-queues.csv");
         std::ofstream background(outputPrefix + "-background.csv");
         std::ofstream switches(outputPrefix + "-switches.csv");
-        if (!summary || !latency || !transactionLatency || !transactionCommit || !blockCommit || !backlog || !bidlPath || !phases || !messages || !network || !queues || !background || !switches) {
+        std::ofstream iorsEvents(outputPrefix + "-iors-events.csv");
+        std::ofstream requestEvents(outputPrefix + "-request-events.csv");
+        if (!summary || !latency || !transactionLatency || !transactionCommit || !blockCommit || !backlog || !phases || !messages || !network || !queues || !background || !switches || !iorsEvents || !requestEvents) {
             throw std::runtime_error("cannot write consensus result files");
         }
 
@@ -2265,11 +2509,22 @@ namespace ns3 {
         for (const auto& application : m_bidlApplications) {
             sequencedTransactions = std::max(sequencedTransactions, application->GetSequencedTransactions());
         }
+        uint64_t cohortSubmitted = 0, cohortIncomplete = 0, cohortAborted = 0;
+        for (const auto& submitted : m_submissionTimes) {
+            if (submitted.second < m_measurementStart || submitted.second >= m_measurementStop) continue;
+            ++cohortSubmitted;
+            if (m_abortTimes.count(submitted.first)) ++cohortAborted;
+            else if (!m_completionTimes.count(submitted.first)) ++cohortIncomplete;
+        }
 
         summary << "metric,value,unit\n"
                 << "submitted_requests," << m_submittedRequests << ",requests\n"
                 << "completed_requests," << GetCompletedRequests() << ",requests\n"
                 << "measured_requests," << GetMeasuredRequests() << ",requests\n"
+                << "latency_completed_samples," << m_requestSamples.size() << ",requests_or_direct_blocks\n"
+                << "latency_cohort_submitted_requests," << cohortSubmitted << ",requests\n"
+                << "latency_cohort_incomplete_requests," << cohortIncomplete << ",requests\n"
+                << "latency_cohort_aborted_requests," << cohortAborted << ",requests\n"
                 << "measurement_start," << m_measurementStart.GetSeconds() << ",seconds\n"
                 << "measurement_stop," << m_measurementStop.GetSeconds() << ",seconds\n"
                 << "completion_start," << m_firstSubmission.GetSeconds() << ",seconds\n"
@@ -2300,10 +2555,13 @@ namespace ns3 {
                 << "bidl_end_to_end_p50," << GetPhaseLatencyPercentile("bidl", BIDL_END_TO_END, 50) << ",microseconds\n"
                 << "bidl_end_to_end_p95," << GetPhaseLatencyPercentile("bidl", BIDL_END_TO_END, 95) << ",microseconds\n"
                 << "retransmissions," << m_retransmissions << ",messages\n"
+                << "retransmissions_full_cycle," << m_allRetransmissions << ",messages\n"
                 << "timed_out_requests," << m_timedOutRequests << ",requests\n"
+                << "timed_out_requests_full_cycle," << m_allTimedOutRequests << ",requests\n"
                 << "replica_decisions," << m_decisions << ",decisions\n"
                 << "view_changes," << GetViewChanges() << ",views\n"
                 << "replica_view_transitions," << m_viewChanges << ",events\n"
+                << "replica_view_transitions_full_cycle," << m_allViewChanges << ",events\n"
                 << "bidl_blocks," << m_bidlBlocks << ",blocks\n"
                 << "submitted_transactions," << sequencedTransactions << ",transactions\n"
                 << "bidl_forged_transactions," << m_bidlForgedTransactions << ",transactions\n"
@@ -2315,6 +2573,39 @@ namespace ns3 {
                 << "bidl_reexecuted_transactions," << m_bidlReexecutedTransactions << ",executor_transactions\n"
                 << "bidl_reexecution_p50," << reexecutionPercentile(50) << ",microseconds\n"
                 << "bidl_reexecution_p95," << reexecutionPercentile(95) << ",microseconds\n";
+        std::ofstream repairSources(outputPrefix + "-bidl-repair-sources.csv");
+        if (!repairSources) throw std::runtime_error("cannot write BIDL repair source summary");
+        repairSources << "schema_version,reason,sender_id,receiver_id,measurement_count,measurement_bytes,full_cycle_count,full_cycle_bytes\n";
+        for (uint8_t reason : {uint8_t{0}, uint8_t{1}}) {
+            const std::string name = reason == 0 ? "gap_response" : "duplicate_client_request";
+            RepairSourceCounts total;
+            for (const auto& [key, counts] : m_bidlRepairSources) {
+                if (std::get<0>(key) != reason) continue;
+                repairSources << "1," << name << ',' << std::get<1>(key) << ',' << std::get<2>(key) << ','
+                    << counts.measuredCount << ',' << counts.measuredBytes << ',' << counts.fullCount << ',' << counts.fullBytes << '\n';
+                total.measuredCount += counts.measuredCount;
+                total.measuredBytes += counts.measuredBytes;
+                total.fullCount += counts.fullCount;
+                total.fullBytes += counts.fullBytes;
+            }
+            summary << "bidl_repair_" << name << "_messages," << total.measuredCount << ",messages\n"
+                << "bidl_repair_" << name << "_bytes," << total.measuredBytes << ",bytes\n"
+                << "bidl_repair_" << name << "_messages_full_cycle," << total.fullCount << ",messages\n"
+                << "bidl_repair_" << name << "_bytes_full_cycle," << total.fullBytes << ",bytes\n";
+        }
+        summary << "iors_bidl_marked_waits," << m_bidlMarkedWaits << ",events\n"
+                << "iors_bidl_marked_replacements," << m_bidlMarkedReplacements << ",events\n"
+                << "iors_bidl_marked_timeout_fallbacks," << m_bidlMarkedTimeouts << ",events\n"
+                << "iors_bidl_verification_starts," << m_bidlVerificationStarts << ",events\n"
+                << "iors_bidl_speculative_executions," << m_bidlSpeculativeExecutions << ",events\n"
+                << "iors_bidl_corrective_executions," << m_bidlCorrections << ",events\n"
+                << "iors_bidl_marked_branches_avoided_execution," << m_bidlAvoidedExecutions << ",branches\n"
+                << "iors_bidl_marked_branches_pending_at_observation_end," << m_bidlMarkedAt.size() << ",branches\n"
+                << "iors_bidl_delayed_first_executions," << m_bidlDelayedFirstExecutions << ",events\n"
+                << "iors_bidl_delayed_first_execution_us_sum," << m_bidlDelayedExecutionUs << ",microseconds\n";
+        summary << "zyzzyva_parsed_candidate_records," << m_parsedZyzzyvaCandidates << ",candidates\n"
+                << "zyzzyva_conflicting_candidate_slots," << m_conflictingCandidateSlots.size() << ",slots\n"
+                << "zyzzyva_divergent_candidate_instances," << m_divergentCandidateInstances.size() << ",instances\n";
         summary << "background_completed_flows," << m_backgroundFlows.size() << ",flows\n"
                 << "background_fct_p50," << backgroundPercentile(50) << ",microseconds\n"
                 << "background_fct_p95," << backgroundPercentile(95) << ",microseconds\n";
@@ -2325,6 +2616,30 @@ namespace ns3 {
             switches << index << ',' << policy->GetInstanceTypeId().GetName() << ',' << policy->GetEnqueueEvents() << ','
                      << policy->GetDequeueEvents() << ',' << policy->GetMarkEvents() << ',' << policy->GetDropEvents() << ','
                      << policy->GetTaggedEvents() << '\n';
+        }
+        iorsEvents << "time_us,switch_id,protocol,sender_id,epoch,instance,digest,evidence\n";
+        for (const auto& event : m_iorsEvents) {
+            iorsEvents << event.time.GetMicroSeconds() << ',' << event.switchId << ',' << static_cast<uint32_t>(event.protocol) << ','
+                       << event.senderId << ',' << event.epoch << ',' << event.instance << ',' << event.digest << ','
+                       << static_cast<uint32_t>(event.evidence) << '\n';
+        }
+        if (m_candidateEventStream.is_open()) {
+            m_candidateEventStream.flush();
+            m_candidateEventStream.close();
+        }
+        requestEvents << "client_id,request_id,submitted_us,completed_us,status,aborted_us,transaction_count,completion_path\n";
+        for (const auto& submitted : m_submissionTimes) {
+            auto completed = m_completionTimes.find(submitted.first);
+            requestEvents << submitted.first.first << ',' << submitted.first.second << ','
+                          << submitted.second.GetMicroSeconds() << ',';
+            if (completed != m_completionTimes.end()) requestEvents << completed->second.GetMicroSeconds();
+            auto aborted = m_abortTimes.find(submitted.first);
+            requestEvents << ',' << (completed != m_completionTimes.end() ? "complete" :
+                (aborted != m_abortTimes.end() ? "aborted" : "incomplete")) << ',';
+            if (aborted != m_abortTimes.end()) requestEvents << aborted->second.GetMicroSeconds();
+            auto route = m_completionPaths.find(submitted.first);
+            requestEvents << ',' << m_requestTransactionCounts.at(submitted.first) << ','
+                << (route == m_completionPaths.end() ? "" : (route->second == 1 ? "fast" : route->second == 2 ? "slow" : "generic")) << '\n';
         }
 
         latency << "client_id,request_id,latency_us\n";
@@ -2349,42 +2664,56 @@ namespace ns3 {
             backlog << sample.time.GetMicroSeconds() << ',' << sample.nodeId << ',' << sample.verification << ','
                     << sample.execution << ',' << sample.total << '\n';
         }
-        bidlPath << "direction,sender_id,receiver_id,message_type,sequence_number,bytes,time_us\n";
-        for (const auto& sample : m_bidlPathSamples) {
-            bidlPath << sample.direction << ',' << sample.senderId << ',' << sample.receiverId << ',' << sample.type << ','
-                     << sample.sequence << ',' << sample.bytes << ',' << sample.time.GetMicroSeconds() << '\n';
+        if (m_bidlPathStream.is_open()) {
+            m_bidlPathStream.flush();
+            m_bidlPathStream.close();
         }
 
-        phases << "protocol,node_id,instance_id,phase,elapsed_us\n";
+        phases << "protocol,node_id,instance_id,phase,elapsed_us,time_us,view\n";
         for (const auto& sample : m_phaseSamples) {
             phases << sample.protocol << ',' << sample.nodeId << ',' << sample.instanceId << ',' << sample.phase << ','
-                   << sample.elapsed.GetMicroSeconds() << '\n';
+                   << sample.elapsed.GetMicroSeconds() << ',' << sample.time.GetMicroSeconds() << ',' << sample.view << '\n';
         }
 
-        messages << "message_type,count,bytes\n";
-        for (const auto& [type, count] : m_messagesByType) {
-            messages << type << ',' << count << ',' << m_messageBytesByType.at(type) << '\n';
+        messages << "message_type,measurement_count,measurement_bytes,full_cycle_count,full_cycle_bytes\n";
+        for (const auto& [type, count] : m_allMessagesByType) {
+            auto measurementCount = m_messagesByType.find(type);
+            auto measurementBytes = m_messageBytesByType.find(type);
+            messages << type << ',' << (measurementCount == m_messagesByType.end() ? 0 : measurementCount->second) << ','
+                     << (measurementBytes == m_messageBytesByType.end() ? 0 : measurementBytes->second) << ','
+                     << count << ',' << m_allMessageBytesByType.at(type) << '\n';
         }
+        std::ofstream messageTimeline(outputPrefix + "-message-1ms.csv");
+        messageTimeline << "simulation_ms,message_type,tx_count,tx_bytes\n";
+        for (const auto& [key, totals] : m_messageTimelineBins)
+            messageTimeline << key.first << ',' << key.second << ',' << totals.first << ',' << totals.second << '\n';
 
         Time window = m_measurementStop - m_measurementStart;
-        network << "device,label,tx_packets,tx_bytes,rx_packets,rx_bytes,drops,pfc_pause,pfc_resume,"
-                   "utilization\n";
+        network << "device,label,measurement_tx_packets,measurement_tx_bytes,measurement_rx_packets,measurement_rx_bytes,measurement_drops,"
+                   "full_cycle_tx_packets,full_cycle_tx_bytes,full_cycle_rx_packets,full_cycle_rx_bytes,full_cycle_drops,"
+                   "measurement_pfc_pause,measurement_pfc_resume,full_cycle_pfc_pause,full_cycle_pfc_resume,utilization\n";
         for (uint32_t index = 0; index < m_devices.size(); ++index) {
             const auto& device = m_devices[index];
             double utilization = window.IsPositive() && device.rate.GetBitRate() > 0
                                      ? static_cast<double>(device.txBytes * 8) / (device.rate.GetBitRate() * window.GetSeconds())
                                      : 0.0;
             network << index << ',' << device.label << ',' << device.txPackets << ',' << device.txBytes << ',' << device.rxPackets << ','
-                    << device.rxBytes << ',' << device.drops << ',' << device.pfcPause << ',' << device.pfcResume << ',' << utilization
+                    << device.rxBytes << ',' << device.drops << ',' << device.fullTxPackets << ',' << device.fullTxBytes << ','
+                    << device.fullRxPackets << ',' << device.fullRxBytes << ',' << device.fullDrops << ','
+                    << device.pfcPause << ',' << device.pfcResume << ',' << device.fullPfcPause << ','
+                    << device.fullPfcResume << ',' << utilization
                     << '\n';
         }
 
-        queues << "queue,max_packets,max_bytes,drops,ecn_marks,average_sojourn_us\n";
+        queues << "queue,measurement_max_packets,measurement_max_bytes,measurement_drops,measurement_ecn_marks,measurement_average_sojourn_us,"
+                  "full_cycle_max_packets,full_cycle_max_bytes,full_cycle_drops,full_cycle_ecn_marks,full_cycle_average_sojourn_us\n";
         for (uint32_t index = 0; index < m_queues.size(); ++index) {
             const auto& queue = m_queues[index];
             double average = queue.sojournSamples == 0 ? 0.0 : queue.totalSojourn.GetMicroSeconds() / queue.sojournSamples;
+            double fullAverage = queue.fullSojournSamples == 0 ? 0.0 : queue.fullTotalSojourn.GetMicroSeconds() / queue.fullSojournSamples;
             queues << index << ',' << queue.maxPackets << ',' << queue.maxBytes << ',' << queue.drops << ',' << queue.marks << ','
-                   << average << '\n';
+                   << average << ',' << queue.fullMaxPackets << ',' << queue.fullMaxBytes << ',' << queue.fullDrops << ','
+                   << queue.fullMarks << ',' << fullAverage << '\n';
         }
 
         background << "receiver_id,sender_id,flow_id,bytes,fct_us\n";
@@ -2394,24 +2723,32 @@ namespace ns3 {
         }
     }
 
-    void ConsensusStatistics::OnRequestSubmitted(uint32_t clientId, uint64_t requestId, Time time) {
+    void ConsensusStatistics::OnRequestSubmitted(ConsensusClientApplication* client, uint32_t clientId, uint64_t requestId, Time time) {
         ++m_submittedRequests;
         m_submissionTimes[{clientId, requestId}] = time;
+        m_requestTransactionCounts[{clientId, requestId}] = client->GetRequestTransactionCount(requestId);
         if (!m_hasSubmission) {
             m_firstSubmission = time;
             m_hasSubmission = true;
         }
     }
 
-    void ConsensusStatistics::OnRequestCompleted(uint32_t clientId, uint64_t requestId, Time latency) {
-        ++m_completedRequests;
+    void ConsensusStatistics::OnRequestCompleted(ConsensusClientApplication* client, uint32_t clientId, uint64_t requestId, Time latency) {
+        m_completionPaths[{clientId, requestId}] = client->GetRequestCompletionPath(requestId);
         auto submitted = m_submissionTimes.find({clientId, requestId});
         Time completed = Simulator::Now();
-        if (submitted != m_submissionTimes.end() && submitted->second >= m_measurementStart && submitted->second < m_measurementStop &&
-            completed < m_measurementStop) {
+        if (!m_completionTimes.emplace(std::make_pair(clientId, requestId), completed).second) return;
+        ++m_completedRequests;
+        // Follow the submission cohort through cooldown rather than censoring slow completions.
+        if (submitted != m_submissionTimes.end() && submitted->second >= m_measurementStart && submitted->second < m_measurementStop) {
             m_requestSamples.push_back({clientId, requestId, latency});
         }
         m_lastCompletion = completed;
+    }
+
+    void ConsensusStatistics::OnRequestAborted(uint32_t clientId, uint64_t requestId, Time latency) {
+        (void)latency;
+        if (m_abortTimes.emplace(std::make_pair(clientId, requestId), Simulator::Now()).second) ++m_abortedRequests;
     }
 
     bool ConsensusStatistics::IsMeasuring() const {
@@ -2422,6 +2759,7 @@ namespace ns3 {
         (void)clientId;
         (void)requestId;
         (void)targetId;
+        ++m_allRetransmissions;
         if (IsMeasuring()) {
             ++m_retransmissions;
         }
@@ -2430,12 +2768,18 @@ namespace ns3 {
     void ConsensusStatistics::OnRequestTimedOut(uint32_t clientId, uint64_t requestId) {
         (void)clientId;
         (void)requestId;
+        ++m_allTimedOutRequests;
         if (IsMeasuring()) {
             ++m_timedOutRequests;
         }
     }
 
     void ConsensusStatistics::OnMessage(uint32_t senderId, uint32_t receiverId, uint16_t type, uint64_t instanceId, uint32_t bytes) {
+        ++m_allMessagesByType[type];
+        m_allMessageBytesByType[type] += bytes;
+        auto& timeline = m_messageTimelineBins[{static_cast<uint64_t>(Simulator::Now().GetMicroSeconds() / 1000), type}];
+        ++timeline.first;
+        timeline.second += bytes;
         if (!IsMeasuring()) {
             return;
         }
@@ -2444,6 +2788,105 @@ namespace ns3 {
         (void)instanceId;
         ++m_messagesByType[type];
         m_messageBytesByType[type] += bytes;
+    }
+
+    void ConsensusStatistics::OnCandidate(uint32_t senderId, uint32_t receiverId, uint16_t type, uint64_t view,
+                                          uint64_t instanceId, uint64_t digest, uint32_t clientId, uint64_t requestId, uint8_t phase, uint8_t marked) {
+        CandidateEventSample event{Simulator::Now(), senderId, receiverId, type, view, instanceId, digest,
+                                   clientId, requestId, phase, marked};
+        if (type == 30) {
+            BidlMarkedKey key{receiverId, view, instanceId, digest, clientId, requestId};
+            if (phase == BIDL_CANDIDATE_SPECULATIVE_EXECUTION) {
+                ++m_bidlSpeculativeExecutions;
+                m_bidlExecutedCandidates.insert(key);
+                auto found = m_bidlMarkedAt.find(key);
+                if (found != m_bidlMarkedAt.end()) {
+                    m_bidlMarkedExecuted.insert(found->first);
+                    ++m_bidlDelayedFirstExecutions;
+                    m_bidlDelayedExecutionUs += (Simulator::Now() - found->second).GetMicroSeconds();
+                    RecordCandidateEvent(event);
+                    m_bidlMarkedAt.erase(found);
+                } else if (m_diagnosticEvents) RecordCandidateEvent(event);
+                return;
+            }
+            if (phase == BIDL_CANDIDATE_MARKED_WAIT) {
+                ++m_bidlMarkedWaits;
+                m_bidlMarkedAt.emplace(key, Simulator::Now());
+                if (m_bidlExecutedCandidates.count(key)) m_bidlMarkedExecuted.insert(key);
+            } else if (phase == BIDL_CANDIDATE_MARKED_REPLACED) {
+                ++m_bidlMarkedReplacements;
+                auto found = m_bidlMarkedAt.find(key);
+                if (found != m_bidlMarkedAt.end()) {
+                    if (!m_bidlMarkedExecuted.count(found->first)) ++m_bidlAvoidedExecutions;
+                    m_bidlMarkedAt.erase(found);
+                }
+            } else if (phase == BIDL_CANDIDATE_MARKED_TIMEOUT && marked) {
+                ++m_bidlMarkedTimeouts;
+            } else if (phase == BIDL_CANDIDATE_VERIFICATION_START) {
+                ++m_bidlVerificationStarts;
+            } else if (phase == BIDL_CANDIDATE_CORRECTION_COMPLETE) {
+                ++m_bidlCorrections;
+            }
+            if (phase == BIDL_CANDIDATE_NORMAL_COMMIT || phase == BIDL_CANDIDATE_OLD_BRANCH_REPLACED) {
+                if (m_diagnosticEvents) RecordCandidateEvent(event);
+                return;
+            }
+            const bool tracked = m_bidlMarkedAt.count(key) != 0;
+            const bool decision = phase == BIDL_CANDIDATE_MARKED_WAIT || phase == BIDL_CANDIDATE_MARKED_REPLACED ||
+                phase == BIDL_CANDIDATE_CORRECTION_COMPLETE || phase == BIDL_CANDIDATE_CORRECTION_QUEUED ||
+                (tracked && (phase == BIDL_CANDIDATE_VERIFICATION_START ||
+                             phase == BIDL_CANDIDATE_VERIFICATION_COMPLETE ||
+                             phase == BIDL_CANDIDATE_EXECUTION_QUEUED));
+            if (m_diagnosticEvents || marked || decision) RecordCandidateEvent(event);
+            return;
+        }
+        const bool retainAll = m_diagnosticEvents || marked;
+        if (type != 40 || phase != 1) {
+            if (retainAll) RecordCandidateEvent(event);
+            return;
+        }
+        ++m_parsedZyzzyvaCandidates;
+        const auto key = std::make_tuple(view, instanceId, receiverId);
+        if (m_conflictingCandidateSlots.count(key)) {
+            RecordCandidateEvent(event);
+            return;
+        }
+        auto first = m_firstCandidateBySlot.emplace(key, event);
+        const auto instanceKey = std::make_pair(view, instanceId);
+        if (!first.second && (first.first->second.digest != digest || first.first->second.clientId != clientId ||
+                              first.first->second.requestId != requestId)) {
+            m_conflictingCandidateSlots.insert(key);
+            m_divergentCandidateInstances.insert(instanceKey);
+            auto begin = m_firstCandidateBySlot.lower_bound(std::make_tuple(view, instanceId, 0));
+            for (auto it = begin; it != m_firstCandidateBySlot.end() &&
+                 std::get<0>(it->first) == view && std::get<1>(it->first) == instanceId; ++it)
+                RecordCandidateEvent(it->second);
+            RecordCandidateEvent(event);
+            return;
+        }
+        if (!first.second && retainAll) RecordCandidateEvent(event);
+        if (!first.second) return;
+        if (m_divergentCandidateInstances.count(instanceKey)) {
+            RecordCandidateEvent(event);
+            return;
+        }
+        auto begin = m_firstCandidateBySlot.lower_bound(std::make_tuple(view, instanceId, 0));
+        bool divergence = false;
+        for (auto it = begin; it != m_firstCandidateBySlot.end() &&
+             std::get<0>(it->first) == view && std::get<1>(it->first) == instanceId; ++it) {
+            if (it->second.digest != digest || it->second.clientId != clientId || it->second.requestId != requestId) {
+                divergence = true;
+                break;
+            }
+        }
+        if (divergence) {
+            m_divergentCandidateInstances.insert(instanceKey);
+            for (auto it = begin; it != m_firstCandidateBySlot.end() &&
+                 std::get<0>(it->first) == view && std::get<1>(it->first) == instanceId; ++it)
+                RecordCandidateEvent(it->second);
+        } else if (retainAll) {
+            RecordCandidateEvent(event);
+        }
     }
 
     void ConsensusStatistics::OnDecision(uint32_t replicaId, uint64_t instanceId, uint64_t digest, Time time) {
@@ -2458,6 +2901,7 @@ namespace ns3 {
     }
 
     void ConsensusStatistics::OnViewChanged(uint32_t replicaId, uint64_t view, uint32_t primaryId) {
+        ++m_allViewChanges;
         if (!IsMeasuring()) {
             return;
         }
@@ -2468,27 +2912,34 @@ namespace ns3 {
     }
 
     void ConsensusStatistics::OnPbftPhase(uint32_t replicaId, uint64_t instanceId, uint16_t phase, Time elapsed) {
-        m_phaseSamples.push_back({"pbft", replicaId, instanceId, phase, elapsed});
+        m_phaseSamples.push_back({"pbft", replicaId, instanceId, phase, elapsed, Simulator::Now()});
     }
 
     void ConsensusStatistics::OnEnginePhase(uint32_t replicaId, uint8_t protocol, uint64_t instanceId, uint16_t phase, Time elapsed) {
-        if (!IsMeasuring()) {
-            return;
-        }
         std::string name = "protocol-" + std::to_string(protocol);
         if (protocol == static_cast<uint8_t>(ConsensusProtocol::PBFT)) {
             name = "pbft";
         } else if (protocol == static_cast<uint8_t>(ConsensusProtocol::HOTSTUFF)) {
             name = "hotstuff";
+        } else if (protocol == static_cast<uint8_t>(ConsensusProtocol::ZYZZYVA)) {
+            name = "zyzzyva";
+        } else if (protocol == static_cast<uint8_t>(ConsensusProtocol::EZBFT)) {
+            name = "ezbft";
         }
-        m_phaseSamples.push_back({name, replicaId, instanceId, phase, elapsed});
+        uint64_t view = 0;
+        if (name == "zyzzyva") {
+            for (const auto& application : m_replicaApplications) {
+                if (application->GetReplicaId() != replicaId) continue;
+                auto engine = DynamicCast<ZyzzyvaEngine>(application->GetEngine());
+                if (engine) view = engine->GetView();
+            }
+            if (phase >= 14 && phase <= 18) view = instanceId;
+        }
+        m_phaseSamples.push_back({name, replicaId, instanceId, phase, elapsed, Simulator::Now(), view});
     }
 
     void ConsensusStatistics::OnBidlPhase(uint32_t nodeId, uint64_t blockId, uint16_t phase, Time elapsed) {
-        if (!IsMeasuring()) {
-            return;
-        }
-        m_phaseSamples.push_back({"bidl", nodeId, blockId, phase, elapsed});
+        m_phaseSamples.push_back({"bidl", nodeId, blockId, phase, elapsed, Simulator::Now()});
     }
 
     void ConsensusStatistics::OnBidlBatch(uint32_t nodeId, uint64_t blockId, uint32_t transactions) {
@@ -2510,7 +2961,7 @@ namespace ns3 {
         if (m_committedBidlBlocks.insert(blockId).second && m_clients.empty() && IsMeasuring()) {
             m_requestSamples.push_back({nodeId, blockId, latency});
         }
-        m_lastCompletion = Simulator::Now();
+        if (m_clients.empty()) m_lastCompletion = Simulator::Now();
     }
 
     void ConsensusStatistics::OnBidlTransactionCommit(uint32_t nodeId, uint64_t sequence, Time latency) {
@@ -2525,26 +2976,41 @@ namespace ns3 {
 
     void ConsensusStatistics::OnExecutionBacklog(uint32_t nodeId, uint32_t verification, uint32_t execution, uint32_t total) {
         m_backlogSamples.push_back({nodeId, Simulator::Now(), verification, execution, total});
+        if (m_bidlLiveProgressStream.is_open()) {
+            m_bidlLiveProgressStream << Simulator::Now().GetMicroSeconds() << ',' << nodeId << ',' << verification
+                << ',' << execution << ',' << total << ',' << m_completedRequests << '\n';
+            if (Simulator::Now().GetMilliSeconds() % 100 == 0) m_bidlLiveProgressStream.flush();
+        }
     }
 
     void ConsensusStatistics::OnBidlMessageTx(uint32_t senderId, uint32_t receiverId, uint16_t type, uint64_t instanceId, uint32_t bytes) {
-        if (type == static_cast<uint16_t>(ConsensusMessageType::BIDL_TRANSACTION)) {
-            m_bidlPathSamples.push_back({"tx", senderId, receiverId, type, instanceId, bytes, Simulator::Now()});
+        OnMessage(senderId, receiverId, type, instanceId, bytes);
+
+    }
+
+    void ConsensusStatistics::OnBidlRepairTx(uint32_t senderId, uint32_t receiverId, uint64_t sequence,
+                                            uint8_t reason, uint32_t bytes) {
+        (void)sequence;
+        auto& counts = m_bidlRepairSources[{reason, senderId, receiverId}];
+        ++counts.fullCount;
+        counts.fullBytes += bytes;
+        if (IsMeasuring()) {
+            ++counts.measuredCount;
+            counts.measuredBytes += bytes;
         }
     }
 
     void ConsensusStatistics::OnBidlMessageRx(uint32_t senderId, uint32_t receiverId, uint16_t type, uint64_t instanceId, uint32_t bytes) {
-        if (type == static_cast<uint16_t>(ConsensusMessageType::BIDL_TRANSACTION)) {
-            m_bidlPathSamples.push_back({"rx", senderId, receiverId, type, instanceId, bytes, Simulator::Now()});
-        }
+
     }
 
     void ConsensusStatistics::OnBidlForged(uint32_t nodeId, uint64_t sequence, uint32_t messages, uint64_t bytes) {
         if (!IsMeasuring()) {
             return;
         }
-        (void)nodeId;
-        (void)sequence;
+        if (m_bidlAttackEventStream.is_open())
+            m_bidlAttackEventStream << Simulator::Now().GetMicroSeconds() << ',' << nodeId << ',' << sequence << ','
+                                    << messages << ',' << bytes << '\n';
         ++m_bidlForgedTransactions;
         m_bidlForgedMessages += messages;
         m_bidlForgedBytes += bytes;
@@ -2561,9 +3027,9 @@ namespace ns3 {
     }
 
     void ConsensusStatistics::OnBidlReexecution(uint32_t nodeId, uint64_t blockId, uint32_t transactions, Time latency) {
-        if (!IsMeasuring()) {
-            return;
-        }
+        if (m_bidlReexecutionEventStream.is_open())
+            m_bidlReexecutionEventStream << Simulator::Now().GetMicroSeconds() << ',' << nodeId << ',' << blockId << ','
+                                         << transactions << ',' << latency.GetMicroSeconds() << '\n';
         (void)nodeId;
         ++m_bidlReexecutionEvents;
         m_bidlReexecutedTransactions += transactions;
@@ -2571,14 +3037,49 @@ namespace ns3 {
         m_bidlReexecutionLatencies.push_back(latency);
     }
 
-    void ConsensusStatistics::OnBackgroundFlowCompleted(uint32_t receiverId, uint32_t senderId, uint64_t flowId, uint32_t bytes, Time fct) {
-        if (!IsMeasuring()) {
-            return;
+    void ConsensusStatistics::OnMessageEvent(bool tx, const ConsensusMessage& message) {
+        const uint16_t type = static_cast<uint16_t>(message.type);
+        const bool needed = type == 30 || type == 65 || type == 32 || type == 36 || type == 37 ||
+            type == 60 || type == 62 || type == 63 || type == 64 || type == 66 || (type >= 42 && type <= 47);
+        if ((m_diagnosticEvents || needed) && m_bidlPathStream.is_open())
+            m_bidlPathStream << (tx ? "tx" : "rx") << ',' << message.senderId << ',' << message.receiverId << ','
+                << type << ',' << message.instanceId << ',' << message.ToPacket()->GetSize() << ','
+                << Simulator::Now().GetMicroSeconds() << ',' << message.messageId << ',' << message.view << ','
+                << message.clientId << ',' << message.requestId << ',' << message.digest << ','
+                << Simulator::Now().GetNanoSeconds() << '\n';
+    }
+
+    void ConsensusStatistics::OnTransactionFinalized(uint32_t node, uint64_t sequence, uint64_t block,
+                                                     uint32_t client, uint64_t request, uint32_t transactions) {
+        if (m_finalizedStream.is_open()) m_finalizedStream << Simulator::Now().GetNanoSeconds() << ',' << node << ','
+            << sequence << ',' << block << ',' << client << ',' << request << ',' << transactions << '\n';
+    }
+
+    void ConsensusStatistics::OnBackgroundFlowStarted(uint32_t sender, uint32_t receiver, uint64_t flow, uint32_t bytes) {
+        if (m_backgroundEventStream.is_open()) m_backgroundEventStream << "start," << Simulator::Now().GetNanoSeconds()
+            << ',' << sender << ',' << receiver << ',' << flow << ',' << bytes << ",\n";
+    }
+
+    void ConsensusStatistics::SampleReplicaBacklog() {
+        for (const auto& application : m_replicaApplications) {
+            auto engine = DynamicCast<ZyzzyvaEngine>(application->GetEngine());
+            if (engine && m_replicaBacklogStream.is_open()) m_replicaBacklogStream << Simulator::Now().GetNanoSeconds()
+                << ',' << application->GetReplicaId() << ',' << engine->GetView() << ','
+                << application->GetVerificationBacklog() << ',' << engine->GetExecutionBacklog() << ','
+                << engine->GetBufferedOrderCount() << ',' << engine->IsRecovering() << '\n';
         }
+        Simulator::Schedule(MilliSeconds(10), &ConsensusStatistics::SampleReplicaBacklog, this);
+    }
+
+    void ConsensusStatistics::OnBackgroundFlowCompleted(uint32_t receiverId, uint32_t senderId, uint64_t flowId, uint32_t bytes, Time fct) {
         m_backgroundFlows.push_back({receiverId, senderId, flowId, bytes, fct});
+        if (m_backgroundEventStream.is_open()) m_backgroundEventStream << "complete," << Simulator::Now().GetNanoSeconds()
+            << ',' << senderId << ',' << receiverId << ',' << flowId << ',' << bytes << ',' << fct.GetNanoSeconds() << '\n';
     }
 
     void ConsensusStatistics::OnDeviceTx(uint32_t device, Ptr<const Packet> packet) {
+        ++m_devices.at(device).fullTxPackets;
+        m_devices.at(device).fullTxBytes += packet->GetSize();
         if (!IsMeasuring())
             return;
         ++m_devices.at(device).txPackets;
@@ -2586,6 +3087,8 @@ namespace ns3 {
     }
 
     void ConsensusStatistics::OnDeviceRx(uint32_t device, Ptr<const Packet> packet) {
+        ++m_devices.at(device).fullRxPackets;
+        m_devices.at(device).fullRxBytes += packet->GetSize();
         if (!IsMeasuring())
             return;
         ++m_devices.at(device).rxPackets;
@@ -2593,6 +3096,7 @@ namespace ns3 {
     }
 
     void ConsensusStatistics::OnDeviceDrop(uint32_t device, Ptr<const Packet> packet) {
+        ++m_devices.at(device).fullDrops;
         if (!IsMeasuring())
             return;
         (void)packet;
@@ -2610,6 +3114,8 @@ namespace ns3 {
     }
 
     void ConsensusStatistics::OnPfc(uint32_t device, uint32_t event) {
+        if (event == 0 || event == 3) ++m_devices.at(device).fullPfcResume;
+        else ++m_devices.at(device).fullPfcPause;
         if (!IsMeasuring())
             return;
         if (event == 0 || event == 3) {
@@ -2620,47 +3126,48 @@ namespace ns3 {
     }
 
     void ConsensusStatistics::OnQueuePackets(uint32_t queue, uint32_t oldValue, uint32_t newValue) {
-        if (!IsMeasuring())
-            return;
         (void)oldValue;
         m_queues.at(queue).packets = newValue;
+        m_queues.at(queue).fullMaxPackets = std::max(m_queues.at(queue).fullMaxPackets, newValue);
+        if (!IsMeasuring()) return;
         m_queues.at(queue).maxPackets = std::max(m_queues.at(queue).maxPackets, newValue);
     }
 
     void ConsensusStatistics::OnQueueBytes(uint32_t queue, uint32_t oldValue, uint32_t newValue) {
-        if (!IsMeasuring())
-            return;
         (void)oldValue;
         m_queues.at(queue).bytes = newValue;
+        m_queues.at(queue).fullMaxBytes = std::max(m_queues.at(queue).fullMaxBytes, newValue);
+        if (!IsMeasuring()) return;
         m_queues.at(queue).maxBytes = std::max(m_queues.at(queue).maxBytes, newValue);
     }
 
     void ConsensusStatistics::OnQueueDropStored(uint32_t queue, Ptr<const QueueDiscItem> item) {
-        if (!IsMeasuring())
-            return;
         (void)item;
+        ++m_queues.at(queue).fullDrops;
+        if (!IsMeasuring()) return;
         ++m_queues.at(queue).drops;
     }
 
     void ConsensusStatistics::OnQueueDrop(uint32_t queue, Ptr<const QueueDiscItem> item, const char* reason) {
-        if (!IsMeasuring())
-            return;
         (void)item;
         (void)reason;
+        ++m_queues.at(queue).fullDrops;
+        if (!IsMeasuring()) return;
         ++m_queues.at(queue).drops;
     }
 
     void ConsensusStatistics::OnQueueMark(uint32_t queue, Ptr<const QueueDiscItem> item, const char* reason) {
-        if (!IsMeasuring())
-            return;
         (void)item;
         (void)reason;
+        ++m_queues.at(queue).fullMarks;
+        if (!IsMeasuring()) return;
         ++m_queues.at(queue).marks;
     }
 
     void ConsensusStatistics::OnSojourn(uint32_t queue, Time value) {
-        if (!IsMeasuring())
-            return;
+        m_queues.at(queue).fullTotalSojourn += value;
+        ++m_queues.at(queue).fullSojournSamples;
+        if (!IsMeasuring()) return;
         m_queues.at(queue).totalSojourn += value;
         ++m_queues.at(queue).sojournSamples;
     }

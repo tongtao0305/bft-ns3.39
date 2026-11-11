@@ -12,20 +12,25 @@
 #include "ns3/queue-disc-container.h"
 
 #include <cstdint>
+#include <fstream>
 #include <limits>
 #include <map>
 #include <set>
 #include <string>
+#include <tuple>
 #include <vector>
 
 namespace ns3 {
 
     class BidlApplication;
+    class ConsensusApplication;
+    struct ConsensusMessage;
     class ConsensusClientApplication;
     class ConsensusHelper;
     class Packet;
     class QueueDiscItem;
     class RdmaWorkloadApplication;
+    class SwitchNode;
 
     enum class ConsensusSwitchEventType : uint8_t { ENQUEUE, DEQUEUE, MARK, DROP };
 
@@ -183,7 +188,10 @@ namespace ns3 {
         std::string ecnKminMap;
         std::string ecnKmaxMap;
         std::string ecnPmaxMap;
+        std::string zyzzyvaEquivocationPlan;
+        std::string zyzzyvaMaliciousReplicaIds{"0"};
         std::string outputPrefix{"consensus-results"};
+        bool diagnosticEvents{false};
         uint32_t replicaCount{4};
         uint32_t clientCount{1};
         uint32_t clientPhysicalId{std::numeric_limits<uint32_t>::max()};
@@ -204,6 +212,30 @@ namespace ns3 {
         uint32_t rdmaCcMode{0};
         uint32_t rdmaPriorityGroup{3};
         uint32_t rdmaMtu{1000};
+        uint32_t iorsMode{0};
+        bool iorsDetectOnly{false};
+        uint32_t zyzzyvaRecoveryRule{1};
+        bool bidlNativeSequencing{true};
+        bool bidlCompactOrderNotifications{false};
+        uint32_t bidlAttackMode{0};
+        bool zyzzyvaEquivocationEnabled{false};
+        bool zyzzyvaViewChangeEnabled{true};
+        uint32_t ezbftVariant{0};
+        bool ezbftEquivocationEnabled{false};
+        uint32_t ezbftEquivocationTarget{1};
+        double ezbftEquivocationDelayUs{20.0};
+        uint32_t zyzzyvaEquivocationTarget{1};
+        double zyzzyvaEquivocationDelayUs{20.0};
+        uint64_t zyzzyvaEquivocationStartSequence{1};
+        uint32_t iorsCapacity{4096};
+        uint32_t iorsFingerprintBits{64};
+        uint32_t iorsHoldCapacity{128};
+        double iorsTtlUs{10000.0};
+        double iorsFixedWaitUs{10.0};
+        double iorsMaxWaitUs{100.0};
+        bool iorsTerminalGate{false};
+        double iorsGateTimeoutUs{1000.0};
+        bool bidlDenylistEnabled{false};
         uint32_t rdmaAckInterval{1};
         uint32_t rdmaL2ChunkSize{4000};
         uint32_t rdmaWindow{0};
@@ -340,6 +372,8 @@ namespace ns3 {
         ConsensusStatistics();
 
         void SetMeasurementWindow(Time start, Time stop);
+        void SetDiagnosticEvents(bool enabled) { m_diagnosticEvents = enabled; }
+        void SetEventOutputPrefix(const std::string& prefix);
         void AttachClient(Ptr<ConsensusClientApplication> client);
         void AttachReplicas(const ApplicationContainer& applications);
         void AttachBidlApplications(const ApplicationContainer& applications);
@@ -347,8 +381,10 @@ namespace ns3 {
         void AttachNetDevices(const NetDeviceContainer& devices, const DataRate& linkRate, const std::vector<std::string>& labels = {});
         void AttachQueueDiscs(const QueueDiscContainer& queueDiscs);
         void AttachSwitchPolicies(const std::vector<Ptr<ConsensusSwitchPolicy>>& policies);
+        void AttachIorsSwitches(const NodeContainer& switches);
 
         uint64_t GetCompletedRequests() const;
+        uint64_t GetAbortedRequests() const { return m_abortedRequests; }
         uint64_t GetMeasuredRequests() const;
         uint64_t GetCompletedTransactions() const;
         uint64_t GetRetransmissions() const;
@@ -375,9 +411,18 @@ namespace ns3 {
             uint64_t instanceId{0};
             uint16_t phase{0};
             Time elapsed{Seconds(0)};
+            Time time{Seconds(0)};
+            uint64_t view{0};
         };
 
         struct DeviceStats {
+            uint64_t fullTxPackets{0};
+            uint64_t fullTxBytes{0};
+            uint64_t fullRxPackets{0};
+            uint64_t fullRxBytes{0};
+            uint64_t fullDrops{0};
+            uint64_t fullPfcPause{0};
+            uint64_t fullPfcResume{0};
             uint64_t txPackets{0};
             uint64_t txBytes{0};
             uint64_t rxPackets{0};
@@ -399,26 +444,38 @@ namespace ns3 {
 
         struct QueueStats {
             uint32_t packets{0};
+            uint32_t fullMaxPackets{0};
             uint32_t maxPackets{0};
             uint32_t bytes{0};
+            uint32_t fullMaxBytes{0};
             uint32_t maxBytes{0};
             uint64_t drops{0};
+            uint64_t fullDrops{0};
             uint64_t marks{0};
+            uint64_t fullMarks{0};
             Time totalSojourn{Seconds(0)};
             uint64_t sojournSamples{0};
+            Time fullTotalSojourn{Seconds(0)};
+            uint64_t fullSojournSamples{0};
         };
 
-        void OnRequestSubmitted(uint32_t clientId, uint64_t requestId, Time time);
-        void OnRequestCompleted(uint32_t clientId, uint64_t requestId, Time latency);
+        void OnRequestSubmitted(ConsensusClientApplication* client, uint32_t clientId, uint64_t requestId, Time time);
+        void OnRequestCompleted(ConsensusClientApplication* client, uint32_t clientId, uint64_t requestId, Time latency);
+        void OnRequestAborted(uint32_t clientId, uint64_t requestId, Time latency);
         void OnRequestRetransmitted(uint32_t clientId, uint64_t requestId, uint32_t targetId);
         void OnRequestTimedOut(uint32_t clientId, uint64_t requestId);
         void OnMessage(uint32_t senderId, uint32_t receiverId, uint16_t type, uint64_t instanceId, uint32_t bytes);
+        void OnCandidate(uint32_t senderId, uint32_t receiverId, uint16_t type, uint64_t view,
+                         uint64_t instanceId, uint64_t digest, uint32_t clientId, uint64_t requestId, uint8_t phase, uint8_t marked);
         void OnBidlMessageTx(uint32_t senderId, uint32_t receiverId, uint16_t type, uint64_t instanceId, uint32_t bytes);
         void OnBidlMessageRx(uint32_t senderId, uint32_t receiverId, uint16_t type, uint64_t instanceId, uint32_t bytes);
+        void OnBidlRepairTx(uint32_t senderId, uint32_t receiverId, uint64_t sequence, uint8_t reason, uint32_t bytes);
         void OnDecision(uint32_t replicaId, uint64_t instanceId, uint64_t digest, Time time);
         void OnViewChanged(uint32_t replicaId, uint64_t view, uint32_t primaryId);
         void OnPbftPhase(uint32_t replicaId, uint64_t instanceId, uint16_t phase, Time elapsed);
         void OnEnginePhase(uint32_t replicaId, uint8_t protocol, uint64_t instanceId, uint16_t phase, Time elapsed);
+        void OnIorsConflict(uint32_t switchId, uint8_t protocol, uint32_t senderId, uint64_t epoch,
+                           uint64_t instance, uint64_t digest, uint8_t evidence, Time time);
         void OnBidlPhase(uint32_t nodeId, uint64_t blockId, uint16_t phase, Time elapsed);
         void OnBidlBatch(uint32_t nodeId, uint64_t blockId, uint32_t transactions);
         void OnBidlCommit(uint32_t nodeId, uint64_t blockId, uint32_t transactions, Time latency);
@@ -428,6 +485,13 @@ namespace ns3 {
         void OnBidlForged(uint32_t nodeId, uint64_t sequence, uint32_t messages, uint64_t bytes);
         void OnBidlConflictRejected(uint32_t nodeId, uint64_t sequence, uint32_t senderId);
         void OnBidlReexecution(uint32_t nodeId, uint64_t blockId, uint32_t transactions, Time latency);
+        void OnMessageEvent(bool tx, const ConsensusMessage& message);
+        void OnTransactionFinalized(uint32_t node, uint64_t sequence, uint64_t block, uint32_t client, uint64_t request, uint32_t transactions);
+        void OnBackgroundFlowStarted(uint32_t sender, uint32_t receiver, uint64_t flow, uint32_t bytes);
+        void SampleReplicaBacklog();
+        std::vector<Ptr<ConsensusApplication>> m_replicaApplications;
+        std::map<std::pair<uint32_t, uint64_t>, uint8_t> m_completionPaths;
+        mutable std::ofstream m_finalizedStream, m_backgroundEventStream, m_replicaBacklogStream;
         void OnBackgroundFlowCompleted(uint32_t receiverId, uint32_t senderId, uint64_t flowId, uint32_t bytes, Time fct);
         void OnDeviceTx(uint32_t device, Ptr<const Packet> packet);
         void OnDeviceRx(uint32_t device, Ptr<const Packet> packet);
@@ -448,18 +512,52 @@ namespace ns3 {
         std::vector<RequestSample> m_requestSamples;
         std::vector<PhaseSample> m_phaseSamples;
         std::vector<BackgroundFlowSample> m_backgroundFlows;
+        struct IorsEventSample { uint32_t switchId; uint8_t protocol; uint32_t senderId; uint64_t epoch; uint64_t instance; uint64_t digest; uint8_t evidence; Time time; };
+        std::vector<IorsEventSample> m_iorsEvents;
+        struct CandidateEventSample { Time time; uint32_t senderId; uint32_t receiverId; uint16_t type;
+                                      uint64_t view; uint64_t instanceId; uint64_t digest; uint32_t clientId; uint64_t requestId; uint8_t phase; uint8_t marked; };
+        void RecordCandidateEvent(const CandidateEventSample& event);
+        std::map<std::tuple<uint64_t, uint64_t, uint32_t>, CandidateEventSample> m_firstCandidateBySlot;
+        std::set<std::tuple<uint64_t, uint64_t, uint32_t>> m_conflictingCandidateSlots;
+        std::set<std::pair<uint64_t, uint64_t>> m_divergentCandidateInstances;
+        uint64_t m_parsedZyzzyvaCandidates{0};
+        using BidlMarkedKey = std::tuple<uint32_t, uint64_t, uint64_t, uint64_t, uint32_t, uint64_t>;
+        std::map<BidlMarkedKey, Time> m_bidlMarkedAt;
+        std::set<BidlMarkedKey> m_bidlMarkedExecuted;
+        std::set<BidlMarkedKey> m_bidlExecutedCandidates;
+        uint64_t m_bidlSpeculativeExecutions{0};
+        struct RepairSourceCounts {
+            uint64_t measuredCount{0}, measuredBytes{0}, fullCount{0}, fullBytes{0};
+        };
+        std::map<std::tuple<uint8_t, uint32_t, uint32_t>, RepairSourceCounts> m_bidlRepairSources;
+        uint64_t m_bidlMarkedWaits{0};
+        uint64_t m_bidlMarkedReplacements{0};
+        uint64_t m_bidlMarkedTimeouts{0};
+        uint64_t m_bidlVerificationStarts{0};
+        uint64_t m_bidlCorrections{0};
+        uint64_t m_bidlAvoidedExecutions{0};
+        uint64_t m_bidlDelayedFirstExecutions{0};
+        double m_bidlDelayedExecutionUs{0.0};
         struct BacklogSample { uint32_t nodeId; Time time; uint32_t verification; uint32_t execution; uint32_t total; };
         std::vector<BacklogSample> m_backlogSamples;
-        struct BidlPathSample { const char* direction; uint32_t senderId; uint32_t receiverId; uint16_t type; uint64_t sequence; uint32_t bytes; Time time; };
-        std::vector<BidlPathSample> m_bidlPathSamples;
         std::vector<DeviceStats> m_devices;
         std::vector<QueueStats> m_queues;
         std::vector<Ptr<ConsensusSwitchPolicy>> m_switchPolicies;
         std::map<uint16_t, uint64_t> m_messagesByType;
         std::map<uint16_t, uint64_t> m_messageBytesByType;
+        std::map<uint16_t, uint64_t> m_allMessagesByType;
+        std::map<uint16_t, uint64_t> m_allMessageBytesByType;
+        std::map<std::pair<uint64_t, uint16_t>, std::pair<uint64_t, uint64_t>> m_messageTimelineBins;
+        uint64_t m_allViewChanges{0};
+        uint64_t m_allRetransmissions{0};
+        uint64_t m_allTimedOutRequests{0};
         uint64_t m_submittedRequests;
         uint64_t m_completedRequests;
         std::map<std::pair<uint32_t, uint64_t>, Time> m_submissionTimes;
+        std::map<std::pair<uint32_t, uint64_t>, uint32_t> m_requestTransactionCounts;
+        std::map<std::pair<uint32_t, uint64_t>, Time> m_completionTimes;
+        std::map<std::pair<uint32_t, uint64_t>, Time> m_abortTimes;
+        uint64_t m_abortedRequests{0};
         uint64_t m_retransmissions;
         uint64_t m_timedOutRequests;
         uint64_t m_decisions;
@@ -487,6 +585,12 @@ namespace ns3 {
         Time m_measurementStart;
         Time m_measurementStop;
         bool m_hasSubmission;
+        bool m_diagnosticEvents{false};
+        mutable std::ofstream m_candidateEventStream;
+        mutable std::ofstream m_bidlPathStream;
+        mutable std::ofstream m_bidlLiveProgressStream;
+        mutable std::ofstream m_bidlAttackEventStream;
+        mutable std::ofstream m_bidlReexecutionEventStream;
     };
 
 } // namespace ns3

@@ -12,12 +12,31 @@
 
 #include <map>
 #include <set>
+#include <tuple>
 #include <utility>
 #include <vector>
 
 namespace ns3 {
 
+    // CandidateEvent phases are part of the CSV schema. Keep terminal decisions
+    // distinct from ordinary transaction lifecycle events.
+    enum BidlCandidateEventPhase : uint8_t {
+        BIDL_CANDIDATE_SPECULATIVE_EXECUTION = 2,
+        BIDL_CANDIDATE_MARKED_WAIT = 3,
+        BIDL_CANDIDATE_MARKED_REPLACED = 4,
+        BIDL_CANDIDATE_MARKED_TIMEOUT = 5,
+        BIDL_CANDIDATE_VERIFICATION_START = 6,
+        BIDL_CANDIDATE_CORRECTION_COMPLETE = 7,
+        BIDL_CANDIDATE_VERIFICATION_COMPLETE = 8,
+        BIDL_CANDIDATE_EXECUTION_QUEUED = 10,
+        BIDL_CANDIDATE_CORRECTION_QUEUED = 11,
+        BIDL_CANDIDATE_NORMAL_COMMIT = 12,
+        BIDL_CANDIDATE_OLD_BRANCH_REPLACED = 13
+    };
+
     enum BidlRole { BIDL_SEQUENCER = 0, BIDL_ORDERER = 1, BIDL_EXECUTOR = 2, BIDL_MALICIOUS = 3 };
+
+    enum class BidlRepairReason : uint8_t { GAP_REQUEST = 0, DUPLICATE_CLIENT_REQUEST = 1 };
 
     enum BidlPhase : uint16_t {
         BIDL_BLOCK_PROPOSED = 0,
@@ -34,8 +53,15 @@ namespace ns3 {
         BIDL_END_TO_END = 11
     };
 
+    struct BidlTransactionRecord {
+        uint64_t sequence{0};
+        ClientRequest request;
+        uint64_t ingressTimeNs{0};
+    };
+
     struct BidlBlockState {
         uint64_t blockId{0};
+        uint64_t orderView{0};
         uint64_t digest{0};
         uint32_t transactionCount{0};
         Time firstSeen{Seconds(0)};
@@ -55,8 +81,17 @@ namespace ns3 {
         bool persistSent{false};
         bool commitScheduled{false};
         bool committed{false};
+        bool aborted{false};
         std::set<uint32_t> orderedSenders;
         std::set<uint32_t> persistSenders;
+        std::map<uint32_t, uint64_t> persistVectorBySender;
+        std::map<uint64_t, std::set<uint32_t>> persistVectorVoters;
+        std::map<uint32_t, uint64_t> executionResults;
+        std::vector<uint8_t> resultVector;
+        uint64_t resultVectorDigest{0};
+        bool resultSubmitted{false};
+        bool resultVectorReceived{false};
+        std::vector<BidlTransactionRecord> canonicalTransactions;
     };
 
     /**
@@ -65,6 +100,8 @@ namespace ns3 {
      * speculatively while ordering is in progress.
      */
     class BidlApplication : public Application {
+        friend class BidlAuthenticationTestCase;
+        friend class BidlRepairSourceTestCase;
         public:
         static TypeId GetTypeId();
 
@@ -88,11 +125,21 @@ namespace ns3 {
 
         uint64_t GetCommittedBlocks() const;
         uint64_t GetCommittedTransactions() const;
+        uint64_t GetCommittedDigest() const;
+        std::map<uint64_t, uint64_t> GetCommittedBlockHistory() const;
+        uint64_t GetAbortedBlocks() const;
         uint64_t GetSequencedTransactions() const;
         uint64_t GetSequencerCommittedTransactions() const;
+        uint32_t GetDenylistSize() const;
+        uint64_t GetDenylistDeferredTransactions() const;
         bool IsSequencer() const;
+        bool IsExecutor() const { return m_role == BIDL_EXECUTOR; }
         double GetTransactionThroughput() const;
         Ptr<ConsensusEngine> GetEngine() const;
+        static std::vector<uint8_t> EncodeTransactions(const std::vector<BidlTransactionRecord>& records);
+        static bool DecodeTransactions(const std::vector<uint8_t>& bytes, std::vector<BidlTransactionRecord>& records);
+        static void SignRequest(ClientRequest& request);
+        static bool VerifyRequest(const ClientRequest& request);
 
         protected:
         void DoDispose() override;
@@ -104,19 +151,34 @@ namespace ns3 {
 
         void EnqueueTransaction(const ClientRequest& transaction);
         void CompleteSequencerService(uint32_t clientId, uint64_t requestId, uint32_t payloadSize, uint32_t transactionCount,
-                                      uint64_t digest);
+                                      uint64_t digest, std::vector<uint8_t> authentication);
+        bool ReadRequest(const ConsensusMessage& message, ClientRequest& request) const;
+        void OnOrderingViewChanged(uint32_t replica, uint64_t view, uint32_t leader);
+        void HandleSequenceEpoch(const ConsensusMessage& message);
+        void RetryIngress();
+        void ForwardIngressRequest(const ClientRequest& request);
+        void OnSequencerTimeout(uint64_t view);
+        void ResumeOrdering();
+        bool CanSequence() const;
         void SequenceTransaction(const ClientRequest& transaction);
         void ReplyToClient(uint64_t sequence, uint64_t blockId);
         void VerifyTransaction(ConsensusMessage message);
         void CompleteTransactionVerification(ConsensusMessage message);
-        void TryProcessPendingExecutorMessages();
+        void TryProcessPendingExecutorMessages(uint64_t blockId);
+        void RequestMissingTransactions(uint64_t first, uint64_t last);
+        bool IsTransactionAvailableForGap(uint64_t sequence) const;
+        void ObserveTransactionSequence(uint64_t sequence);
+        void AdvanceGapProgress();
+        void RetryMissingTransaction(uint64_t sequence, bool timerExpired = false);
+        void SendSequencedTransaction(uint32_t receiver, uint64_t sequence, BidlRepairReason reason);
         bool StoreTransaction(const ConsensusMessage& message);
         bool ValidateBlock(uint64_t firstSequence, uint32_t count, uint64_t digest) const;
         uint64_t ComputeBlockDigest(uint64_t firstSequence, uint32_t count) const;
         void TryProposeBlocks(bool flushPartial);
         void ProposeBlock(uint64_t firstSequence, uint32_t count);
         void FlushPartialBlock();
-        void TryProcessPendingProposals();
+        void TryProcessPendingProposals(uint64_t availableSequence);
+        void IndexPendingProposal(uint64_t blockId);
 
         void OnTransportReceive(uint32_t peerId, Ptr<Packet> packet);
         void OnEngineSend(uint32_t peerId, const ConsensusMessage& message);
@@ -125,12 +187,22 @@ namespace ns3 {
         void HandleSequencerMessage(const ConsensusMessage& message);
         void HandleOrdererMessage(const ConsensusMessage& message);
         void HandleExecutorMessage(const ConsensusMessage& message);
+        void OnIorsGateTimeout(uint64_t sequence);
         void HandleMaliciousMessage(const ConsensusMessage& message);
         void ForgeTransaction(ConsensusMessage message);
         void TraceRejectedConflict(const ConsensusMessage& message);
+        void HandleConflictReport(const ConsensusMessage& message);
+        void HandleDenylistVote(const ConsensusMessage& message);
+        void HandleExecutionResult(const ConsensusMessage& message);
+        void HandleResultPersist(const ConsensusMessage& message);
+        void CompleteOrdererPersist(uint64_t blockId, uint32_t transactionCount, uint64_t blockDigest, uint64_t resultDigest,
+                                    const std::vector<uint8_t>& resultVector);
+        void SubmitExecutionResult(BidlBlockState& block);
+        void RequestCanonicalBlock(uint64_t blockId);
 
         void TryExecuteNextTransaction();
-        void CompleteTransaction(uint64_t sequence);
+        void CompleteTransaction(uint64_t sequence, uint64_t generation);
+        void TraceTransaction(uint64_t sequence, uint8_t phase);
         bool AllTransactionsExecuted(const BidlBlockState& block) const;
         bool BlockContainsInvalidTransaction(const BidlBlockState& block) const;
         void CompleteBlockReexecution(uint64_t blockId);
@@ -162,6 +234,32 @@ namespace ns3 {
         Time m_attackStop;
         Time m_attackProcessingTime;
         uint32_t m_attackTargetExecutors;
+        bool m_iorsTerminalGate{false};
+        bool m_denylistEnabled{false};
+        bool m_requireClientAuthentication{false};
+        uint64_t m_sequenceView{0};
+        bool m_nativeSequencing{false};
+        bool m_compactOrderNotifications{false};
+        uint32_t m_attackMode{0};
+        std::map<std::pair<uint32_t, uint64_t>, std::set<uint32_t>> m_metadataConflictReporters;
+        Time m_sequencerTimeout{MilliSeconds(50)};
+        EventId m_ingressRetryEvent;
+        EventId m_sequencerTimeoutEvent;
+        std::map<std::pair<uint32_t, uint64_t>, ClientRequest> m_pendingIngress;
+        std::map<std::pair<uint32_t, uint64_t>, ConsensusMessage> m_terminalAborts;
+        std::map<std::pair<uint64_t, uint32_t>, std::set<uint32_t>> m_sequenceEpochVotes;
+        Time m_iorsGateTimeout{MilliSeconds(1)};
+        std::map<uint64_t, ConsensusMessage> m_iorsPendingMarked;
+        std::map<uint64_t, EventId> m_iorsGateEvents;
+        uint64_t m_observedOrderView{0};
+        std::map<uint64_t, uint32_t> m_transactionSource;
+        std::map<std::pair<uint32_t, uint64_t>, std::set<uint32_t>> m_conflictReporters;
+        std::map<uint32_t, std::set<uint32_t>> m_suspectLeaders;
+        std::map<uint32_t, std::set<uint32_t>> m_denylistVotes;
+        std::set<std::pair<uint64_t, uint32_t>> m_sentDenylistViewRecords;
+        std::set<uint32_t> m_denylist;
+        std::set<uint64_t> m_deferredTransactions;
+        uint64_t m_deferredTotal{0};
         uint64_t m_nextTransactionSequence;
         uint64_t m_nextBlockSequence;
         uint64_t m_nextExecutionSequence;
@@ -173,6 +271,9 @@ namespace ns3 {
         std::map<uint64_t, ClientRequest> m_transactions;
         std::map<std::pair<uint32_t, uint64_t>, uint64_t> m_clientRequestSequences;
         std::map<uint64_t, uint64_t> m_committedTransactionBlocks;
+        std::map<uint64_t, std::set<uint32_t>> m_abortVotes;
+        std::map<std::tuple<uint64_t, uint32_t, uint64_t>, std::set<uint32_t>> m_commitVotes;
+        std::set<uint64_t> m_abortedBlockIds;
         std::map<uint64_t, uint64_t> m_digestSequences;
         std::map<uint64_t, Time> m_transactionArrivalTimes;
         std::map<uint64_t, Time> m_transactionReceiveTimes;
@@ -180,13 +281,28 @@ namespace ns3 {
         std::map<uint64_t, Time> m_consensusStartTimes;
         std::map<uint64_t, ConsensusDecision> m_pendingConsensusDecisions;
         std::map<std::pair<uint32_t, uint64_t>, Time> m_ingressArrivalTimes;
+        std::set<std::pair<uint32_t, uint64_t>> m_queuedIngressRequests;
         std::map<uint64_t, BidlBlockState> m_blocks;
+        std::map<std::tuple<uint64_t, uint32_t, uint64_t, uint64_t>, BidlBlockState> m_orderedCandidates;
+        std::map<uint64_t, uint64_t> m_orderedSequenceBlocks;
+        std::map<uint64_t, uint64_t> m_transactionEpoch;
+        std::map<uint64_t, ConsensusMessage> m_decidedBlocks;
+        std::map<uint64_t, EventId> m_blockFetchEvents;
+        uint64_t m_executionGeneration{0};
+        std::map<uint64_t, std::map<uint32_t, uint64_t>> m_ordererExecutionResults;
+        std::map<uint64_t, uint64_t> m_ordererPersistedResultDigests;
         std::map<uint64_t, ConsensusMessage> m_pendingBlockProposals;
+        std::map<uint64_t, std::set<uint64_t>> m_proposalsWaitingForTransaction;
+        std::map<uint64_t, uint64_t> m_proposalMissingTransaction;
         std::multimap<uint64_t, ConsensusMessage> m_pendingExecutorMessages;
         std::set<uint64_t> m_executedTransactions;
         std::set<uint64_t> m_invalidTransactions;
         std::set<uint64_t> m_verificationPending;
         std::map<uint64_t, uint64_t> m_verificationDigests;
+        std::map<uint64_t, EventId> m_gapRequestEvents;
+        std::map<uint64_t, uint32_t> m_gapRequestAttempts;
+        uint64_t m_highestObservedTransactionSequence{0};
+        uint64_t m_nextGapSequence{1};
         std::set<uint64_t> m_committedBlockIds;
         std::set<uint64_t> m_tracedBlocks;
         EventId m_batchEvent;
@@ -202,10 +318,14 @@ namespace ns3 {
 
         TracedCallback<uint32_t, uint64_t, uint32_t> m_batchCreatedTrace;
         TracedCallback<uint32_t, uint64_t, uint32_t, Time> m_blockCommittedTrace;
+        TracedCallback<uint32_t, uint64_t, uint64_t, uint32_t, uint64_t, uint32_t> m_transactionFinalizedTrace;
         TracedCallback<uint32_t, uint64_t, Time> m_transactionCommittedTrace;
         TracedCallback<uint32_t, uint64_t, uint32_t, Time, Time> m_blockCommitTimeTrace;
+        TracedCallback<bool, const ConsensusMessage&> m_messageEventTrace;
         TracedCallback<uint32_t, uint32_t, uint16_t, uint64_t, uint32_t> m_messageTxTrace;
         TracedCallback<uint32_t, uint32_t, uint16_t, uint64_t, uint32_t> m_messageRxTrace;
+        TracedCallback<uint32_t, uint32_t, uint64_t, uint8_t, uint32_t> m_repairTxTrace;
+        TracedCallback<uint32_t, uint32_t, uint16_t, uint64_t, uint64_t, uint64_t, uint32_t, uint64_t, uint8_t, uint8_t> m_candidateTrace;
         TracedCallback<uint32_t, uint64_t, uint16_t, Time> m_phaseChangedTrace;
         TracedCallback<uint32_t, uint64_t, uint32_t, uint64_t> m_forgedTransactionTrace;
         TracedCallback<uint32_t, uint64_t, uint32_t> m_conflictRejectedTrace;

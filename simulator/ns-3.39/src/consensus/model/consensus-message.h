@@ -9,6 +9,7 @@
 
 #include <cstdint>
 #include <ostream>
+#include <vector>
 
 namespace ns3 {
 
@@ -16,7 +17,7 @@ namespace ns3 {
      * \ingroup consensus
      * Protocol identifiers carried by the common consensus envelope.
      */
-    enum class ConsensusProtocol : uint8_t { GENERIC = 0, PBFT = 1, HOTSTUFF = 2 };
+    enum class ConsensusProtocol : uint8_t { GENERIC = 0, PBFT = 1, HOTSTUFF = 2, ZYZZYVA = 3, EZBFT = 4 };
 
     /**
      * \ingroup consensus
@@ -32,9 +33,39 @@ namespace ns3 {
         VIEW_CHANGE = 13,
         NEW_VIEW = 14,
         BIDL_TRANSACTION = 30,
+        BIDL_GAP_REQUEST = 31,
+        BIDL_ABORT = 32,
         BIDL_ORDERED_BLOCK = 33,
         BIDL_PERSIST = 34,
         BIDL_COMMIT = 35,
+        BIDL_CONFLICT_REPORT = 36,
+        BIDL_DENYLIST_VOTE = 37,
+        BIDL_EXECUTION_RESULT = 38,
+        BIDL_RESULT_PERSIST = 39,
+        BIDL_BLOCK_REQUEST = 60,
+        BIDL_SEQUENCE_EPOCH = 61,
+        ZYZZYVA_ORDER_REQ = 40,
+        ZYZZYVA_SPEC_RESPONSE = 41,
+        ZYZZYVA_COMMIT_REQUEST = 42,
+        ZYZZYVA_LOCAL_COMMIT = 43,
+        ZYZZYVA_FILL_HOLE = 44,
+        ZYZZYVA_HATE_PRIMARY = 45,
+        ZYZZYVA_CHECKPOINT = 46,
+        ZYZZYVA_REPAIR = 47,
+        ZYZZYVA_IORS_EVIDENCE_REQUEST = 62,
+        ZYZZYVA_IORS_EVIDENCE_RESPONSE = 63,
+        ZYZZYVA_POM = 64,
+        BIDL_TRANSACTION_REPAIR = 65,
+        BIDL_BLOCK_SUMMARY_REQUEST = 66,
+        EZBFT_SPEC_ORDER = 50,
+        EZBFT_SPEC_REPLY = 51,
+        EZBFT_COMMIT_FAST = 52,
+        EZBFT_COMMIT = 53,
+        EZBFT_COMMIT_REPLY = 54,
+        EZBFT_OWNER_CHANGE = 55,
+        EZBFT_NEW_OWNER = 56,
+        EZBFT_PREPARE = 57,
+        EZBFT_COMMIT_VOTE = 58,
         RDMA_BACKGROUND_FLOW = 100
     };
 
@@ -154,6 +185,12 @@ namespace ns3 {
         uint32_t clientId{0};
         uint64_t requestId{0};
         uint32_t transactionCount{0};
+        bool iorsPresent{false};
+        bool iorsMarked{false};
+        uint8_t iorsEvidence{0};
+        bool iorsWaited{false};
+        std::vector<uint8_t> payloadBytes;
+        std::vector<uint8_t> authentication;
 
         Ptr<Packet> ToPacket() const;
         static bool FromPacket(Ptr<Packet> packet, ConsensusMessage& message);
@@ -171,6 +208,7 @@ namespace ns3 {
         uint32_t payloadSize{0};
         uint32_t transactionCount{1};
         uint64_t digest{0};
+        std::vector<uint8_t> authentication;
     };
 
     /**

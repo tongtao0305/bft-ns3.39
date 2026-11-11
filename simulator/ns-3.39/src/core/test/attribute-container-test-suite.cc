@@ -291,7 +291,7 @@ AttributeContainerTestCase::DoRun()
         for (const auto& v : ref)
         {
             NS_TEST_ASSERT_MSG_NE(true, (aciter == ac.End()), "AC iterator reached end");
-            NS_TEST_ASSERT_MSG_EQ(v, (*aciter)->Get(), "Incorrect value");
+            NS_TEST_ASSERT_MSG_EQ((std::make_pair(v.first, v.second)), (*aciter)->Get(), "Incorrect value");
             ++aciter;
         }
         NS_TEST_ASSERT_MSG_EQ(true, (aciter == ac.End()), "AC iterator did not reach end");

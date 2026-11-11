@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <deque>
 #include <map>
+#include <set>
 #include <tuple>
 #include <vector>
 
@@ -192,20 +193,29 @@ namespace ns3 {
 
         private:
         using FlowKey = std::tuple<uint32_t, uint16_t, uint16_t>;
+        struct PendingSend {
+            Ptr<Packet> packet;
+            ConsensusTransportMetadata metadata;
+        };
 
         void HandleFragment(uint32_t sourceIp, uint16_t sourcePort, uint16_t priorityGroup, uint32_t sequence, Ptr<Packet> fragment);
-        void HandleSendComplete(uint16_t sourcePort);
-        uint16_t AllocateSourcePort();
+        void HandleSendComplete(uint32_t peerId, uint16_t sourcePort);
+        uint16_t AllocateSourcePort(uint32_t peerId);
         void SendNow(uint32_t peerId, Ptr<Packet> packet, ConsensusTransportMetadata metadata);
 
         Ptr<Node> m_node;
         Ptr<RdmaDriver> m_driver;
         std::map<FlowKey, Ptr<Packet>> m_reassembly;
-        std::map<uint16_t, uint32_t> m_sourcePortPeers;
+        // RDMA QP identity includes the remote address, so the same source
+        // port is independent for different peers. Keep the in-flight set
+        // scoped to a peer to avoid exhausting the 16-bit port space globally.
+        std::set<std::pair<uint32_t, uint16_t>> m_sourcePortsInUse;
+        std::map<uint32_t, std::deque<PendingSend>> m_waitingForSourcePort;
         uint16_t m_priorityGroup;
         uint16_t m_nextSourcePort;
         uint32_t m_window;
         uint64_t m_baseRttNs;
+        bool m_iorsWireEnabled;
         bool m_running;
     };
 

@@ -4,6 +4,7 @@
 #include "ns3/consensus-application.h"
 #include "ns3/consensus-engine.h"
 #include "ns3/consensus-transport.h"
+#include "ns3/ezbft-engine.h"
 #include "ns3/inet-socket-address.h"
 #include "ns3/pbft-engine.h"
 #include "ns3/uinteger.h"
