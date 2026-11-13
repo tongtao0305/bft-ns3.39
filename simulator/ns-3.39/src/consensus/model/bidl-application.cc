@@ -716,7 +716,16 @@ namespace ns3 {
         return true;
     }
 
+    bool BidlApplication::IsTransactionReplay(const ConsensusMessage& message) const {
+        if (message.digest == INVALID_TRANSACTION_DIGEST) return false;
+        auto stored = m_digestSequences.find(message.digest);
+        if (stored != m_digestSequences.end() && stored->second != message.instanceId) return true;
+        auto pending = m_verificationDigestSequences.find(message.digest);
+        return pending != m_verificationDigestSequences.end() && pending->second != message.instanceId;
+    }
+
     void BidlApplication::VerifyTransaction(ConsensusMessage message) {
+        if (IsTransactionReplay(message)) return;
         ClientRequest verified;
         if (!ReadRequest(message, verified)) return;
         auto stored = m_transactions.find(message.instanceId);
@@ -735,6 +744,9 @@ namespace ns3 {
         }
         m_verificationPending.insert(message.instanceId);
         m_verificationDigests[message.instanceId] = message.digest;
+        if (message.digest != INVALID_TRANSACTION_DIGEST)
+            m_verificationDigestSequences[message.digest] = message.instanceId;
+        ObserveTransactionSequence(message.instanceId);
         auto retry = m_gapRequestEvents.find(message.instanceId);
         if (retry != m_gapRequestEvents.end()) {
             Simulator::Cancel(retry->second);
@@ -751,6 +763,9 @@ namespace ns3 {
     void BidlApplication::CompleteTransactionVerification(ConsensusMessage message) {
         m_verificationPending.erase(message.instanceId);
         m_verificationDigests.erase(message.instanceId);
+        auto digest = m_verificationDigestSequences.find(message.digest);
+        if (digest != m_verificationDigestSequences.end() && digest->second == message.instanceId)
+            m_verificationDigestSequences.erase(digest);
         m_candidateTrace(message.senderId, m_nodeId, static_cast<uint16_t>(message.type), message.view,
                          message.instanceId, message.digest, message.clientId, message.requestId,
                          BIDL_CANDIDATE_VERIFICATION_COMPLETE,
@@ -768,7 +783,10 @@ namespace ns3 {
         } else if (m_role == BIDL_EXECUTOR) {
             TryExecuteNextTransaction();
             auto block = m_orderedSequenceBlocks.find(message.instanceId);
-            if (block != m_orderedSequenceBlocks.end()) TryProcessPendingExecutorMessages(block->second);
+            if (block != m_orderedSequenceBlocks.end()) {
+                TryPersist(m_blocks.at(block->second));
+                TryProcessPendingExecutorMessages(block->second);
+            }
         }
     }
 
@@ -1153,7 +1171,6 @@ namespace ns3 {
         if (message.type == ConsensusMessageType::BIDL_TRANSACTION || message.type == ConsensusMessageType::BIDL_TRANSACTION_REPAIR) {
             if (std::find(m_sequencerIds.begin(), m_sequencerIds.end(), message.senderId) != m_sequencerIds.end()) {
                 VerifyTransaction(message);
-                ObserveTransactionSequence(message.instanceId);
             }
             return;
         }
@@ -1198,6 +1215,7 @@ namespace ns3 {
             bool fromBroadcaster =
                 std::find(m_broadcasterIds.begin(), m_broadcasterIds.end(), message.senderId) != m_broadcasterIds.end();
             if (fromSequencer || (fromBroadcaster && message.type == ConsensusMessageType::BIDL_TRANSACTION)) {
+                if (IsTransactionReplay(message)) return;
                 if (m_iorsTerminalGate) {
                     if (message.iorsMarked && m_transactions.count(message.instanceId) == 0) {
                         m_candidateTrace(message.senderId, m_nodeId, static_cast<uint16_t>(message.type), message.view,
@@ -1227,7 +1245,6 @@ namespace ns3 {
                     }
                 }
                 VerifyTransaction(message);
-                ObserveTransactionSequence(message.instanceId);
             }
             return;
         }
@@ -1300,8 +1317,7 @@ namespace ns3 {
             for (uint64_t sequence = block.blockId; sequence < block.blockId + block.transactionCount; ++sequence)
                 m_orderedSequenceBlocks[sequence] = block.blockId;
             const uint64_t localDigest = ComputeBlockDigest(message.instanceId, message.transactionCount);
-            block.requiresReexecution = block.requiresReexecution ||
-                ((!m_compactOrderNotifications || localDigest != 0) && localDigest != message.digest);
+            block.requiresReexecution = block.requiresReexecution || localDigest != message.digest;
             for (const auto& record : block.canonicalTransactions) {
                 auto local = m_transactions.find(record.sequence);
                 if ((!m_compactOrderNotifications && local == m_transactions.end()) ||
@@ -1731,10 +1747,6 @@ namespace ns3 {
         }
         if (m_compactOrderNotifications && !block.requiresReexecution) {
             const uint64_t localDigest = ComputeBlockDigest(block.blockId, block.transactionCount);
-            if (localDigest == 0) {
-                RequestMissingTransactions(block.blockId, block.blockId + block.transactionCount - 1);
-                return;
-            }
             block.requiresReexecution = localDigest != block.digest;
         }
         if (block.requiresReexecution && !block.reexecutionComplete) {

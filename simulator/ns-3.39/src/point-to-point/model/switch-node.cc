@@ -70,12 +70,6 @@ TypeId SwitchNode::GetTypeId (void)
 	                                  MakeTimeAccessor(&SwitchNode::m_iorsFixedWait), MakeTimeChecker())
 	                    .AddAttribute("IorsMaxWait", "Maximum intervention duration.", TimeValue(MicroSeconds(100)),
 	                                  MakeTimeAccessor(&SwitchNode::m_iorsMaxWait), MakeTimeChecker())
-	                    .AddAttribute("IorsZyzReplicaCount", "Zyzzyva replica count for primary authorization.", UintegerValue(4),
-	                                  MakeUintegerAccessor(&SwitchNode::m_iorsZyzReplicaCount), MakeUintegerChecker<uint32_t>(1))
-	                    .AddAttribute("IorsBidlSequencerId", "Authorized BIDL sequencer identity.", UintegerValue(200),
-	                                  MakeUintegerAccessor(&SwitchNode::m_iorsBidlSequencerId), MakeUintegerChecker<uint32_t>())
-                        .AddAttribute("IorsBidlOrdererCount", "PBFT rotating sequencer count; zero uses the fixed sequencer.", UintegerValue(0),
-                                      MakeUintegerAccessor(&SwitchNode::m_iorsBidlOrdererCount), MakeUintegerChecker<uint32_t>())
 	                    .AddTraceSource("EcnMark",
 	                                    "Packet marked CE by the switch.",
 	                                    MakeTraceSourceAccessor(&SwitchNode::m_ecnMarkTrace),
@@ -269,14 +263,6 @@ bool SwitchNode::SwitchReceiveFromDevice(Ptr<NetDevice> device, Ptr<Packet> pack
 	return true;
 }
 
-void SwitchNode::SetIorsSource(uint32_t ipv4Address, uint32_t senderId) {
-	m_iorsSources[ipv4Address] = senderId;
-}
-
-void SwitchNode::SetIorsIngressPort(uint32_t port, uint32_t ipv4Address) {
-	m_iorsIngressPorts[port] = ipv4Address;
-}
-
 bool SwitchNode::IorsBind(const IorsKey& key, uint64_t value, bool& conflict) {
 	auto existing = m_iorsEntries.find(key);
 	if (existing != m_iorsEntries.end() && existing->second.expires <= Simulator::Now()) {
@@ -334,7 +320,7 @@ void SwitchNode::IorsForward(Ptr<Packet> packet, CustomHeader header) {
 	SendToDev(packet, header);
 }
 
-bool SwitchNode::IorsInspect(Ptr<Packet> packet, const CustomHeader& header, uint32_t ingressPort) {
+bool SwitchNode::IorsInspect(Ptr<Packet> packet, const CustomHeader& header, uint32_t) {
 	const uint32_t length = packet->GetSize();
 	if (length < 74) return false;
 	uint8_t* bytes = packet->GetBuffer();
@@ -363,41 +349,31 @@ bool SwitchNode::IorsInspect(Ptr<Packet> packet, const CustomHeader& header, uin
 		uint64_t digest = read64(base + 42);
 		uint32_t clientId = read32(base + 50);
 		uint64_t requestId = read64(base + 54);
-		auto source = m_iorsSources.find(header.sip);
-		if (source == m_iorsSources.end()) return false;
-		auto expectedIp = m_iorsIngressPorts.find(ingressPort);
-		bool unauthorized = (expectedIp != m_iorsIngressPorts.end() && expectedIp->second != header.sip) ||
-			source->second != sender ||
-			(kind == 30 && sender != (m_iorsBidlOrdererCount ? view % m_iorsBidlOrdererCount : m_iorsBidlSequencerId)) ||
-			(kind == 65 && sender != m_iorsBidlSequencerId && sender >= m_iorsBidlOrdererCount) ||
-			(kind == 40 && sender != view % m_iorsZyzReplicaCount);
 		bool conflict = false;
-		if (!unauthorized) {
-			if (kind == 30 || kind == 65) {
-				bool reverseConflict = false;
-				if (!IorsBind(IorsKey{0, view, slot, 0}, digest, conflict)) return false;
-				if (!IorsBind(IorsKey{1, view, requestId, clientId}, slot, reverseConflict)) return false;
-				conflict = conflict || reverseConflict;
-			} else {
-				if (!IorsBind(IorsKey{kind == 40 ? 2U : 3U, view, slot, sender}, digest, conflict)) return false;
-			}
+		bool reverseConflict = false;
+		if (kind == 30 || kind == 65) {
+			if (!IorsBind(IorsKey{0, view, slot, 0}, digest, conflict)) return false;
+			if (!IorsBind(IorsKey{4, view, digest, 0}, slot, reverseConflict)) return false;
+			bool clientSequenceConflict = false;
+			IorsBind(IorsKey{1, view, requestId, clientId}, slot, clientSequenceConflict);
+		} else {
+			const uint8_t keySpace = kind == 40 ? 2 : 3;
+			if (!IorsBind(IorsKey{keySpace, view, slot, 0}, digest, conflict)) return false;
+			if (!IorsBind(IorsKey{static_cast<uint8_t>(keySpace + 3), view, digest, 0}, slot, reverseConflict)) return false;
 		}
-		if (!unauthorized && !conflict) return false;
+		conflict = conflict || reverseConflict;
+		if (!conflict) return false;
 		if (m_iorsDetectOnly) {
-			if (unauthorized) ++m_iorsUnauthorized;
-			else ++m_iorsEquivocation;
-			m_iorsConflictTrace(GetId(), bytes[base + 3], sender, view, slot, digest,
-			                    unauthorized ? 1 : 2, Simulator::Now());
+			++m_iorsEquivocation;
+			m_iorsConflictTrace(GetId(), bytes[base + 3], sender, view, slot, digest, 2, Simulator::Now());
 			return false;
 		}
 		bytes[ext + 4] |= 1;
 		++m_iorsMarked;
-	if (unauthorized) ++m_iorsUnauthorized;
-	else ++m_iorsEquivocation;
-		m_iorsConflictTrace(GetId(), bytes[base + 3], sender, view, slot, digest,
-		                    unauthorized ? 1 : 2, Simulator::Now());
-		bytes[ext + 5] = unauthorized ? 1 : 2;
-		if ((kind == 30 || kind == 65) && unauthorized && m_iorsMode >= 2 && !bytes[ext + 6] &&
+		++m_iorsEquivocation;
+		m_iorsConflictTrace(GetId(), bytes[base + 3], sender, view, slot, digest, 2, Simulator::Now());
+		bytes[ext + 5] = 2;
+		if ((kind == 30 || kind == 65) && m_iorsMode >= 2 && !bytes[ext + 6] &&
 			m_iorsHeld < m_iorsHoldCapacity) {
 			Time delay = m_iorsMode == 2 ? m_iorsFixedWait : NanoSeconds(m_maxRtt / 2);
 			delay = std::min(delay, m_iorsMaxWait);
@@ -409,7 +385,7 @@ bool SwitchNode::IorsInspect(Ptr<Packet> packet, const CustomHeader& header, uin
 				return true;
 			}
 		}
-	if ((kind == 30 || kind == 65) && unauthorized && m_iorsMode >= 2 && m_iorsHeld >= m_iorsHoldCapacity)
+	if ((kind == 30 || kind == 65) && m_iorsMode >= 2 && m_iorsHeld >= m_iorsHoldCapacity)
 		++m_iorsHoldBypass;
 		return false;
 	}

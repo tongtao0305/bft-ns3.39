@@ -2,6 +2,7 @@
 #include "ns3/consensus-runner.h"
 
 #include <exception>
+#include <csignal>
 #include <iomanip>
 #include <iostream>
 
@@ -41,6 +42,8 @@ static int RunExperiment(int argc, char* argv[]) {
 
 
 int main(int argc, char* argv[]) {
+    std::signal(SIGTERM, RequestConsensusStop);
+    std::signal(SIGINT, RequestConsensusStop);
     try {
         return RunExperiment(argc, argv);
     } catch (const std::exception& error) {

@@ -21,6 +21,7 @@ public:
 
 	static TypeId GetTypeId (void);
 	RdmaDriver();
+	void DoDispose() override;
 
 	// This function init the m_nic according to the NetDevice
 	// So this must be called after all NICs are installed

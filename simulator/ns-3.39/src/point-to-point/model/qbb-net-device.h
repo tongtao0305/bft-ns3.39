@@ -54,6 +54,7 @@ public:
 	RdmaEgressQueue();
 	Ptr<Packet> DequeueQindex(int qIndex);
 	int GetNextQindex(bool paused[]);
+	Time m_nextAvailableTime;
 	int GetLastQueue();
 	uint32_t GetNBytes(uint32_t qIndex);
 	uint32_t GetFlowCount(void);

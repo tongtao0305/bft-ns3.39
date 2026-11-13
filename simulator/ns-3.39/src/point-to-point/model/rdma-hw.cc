@@ -292,7 +292,8 @@ void RdmaHw::UnregisterAppReceiveCallback(uint16_t port) {
 void RdmaHw::DeleteQueuePair(Ptr<RdmaQueuePair> qp) {
 	// remove qp from the m_qpMap
 	uint64_t key = GetQpKey(qp->dip.Get(), qp->sport, qp->m_pg);
-	m_qpMap.erase(key);
+	auto found = m_qpMap.find(key);
+	if (found != m_qpMap.end() && found->second == qp) m_qpMap.erase(found);
 }
 
 Ptr<RdmaRxQueuePair> RdmaHw::GetRxQp(uint32_t sip, uint32_t dip, uint16_t sport, uint16_t dport, uint16_t pg, bool create) {
@@ -401,8 +402,11 @@ int RdmaHw::ReceiveCnp(Ptr<Packet> p, CustomHeader &ch) {
 	uint32_t i;
 	// get qp
 	Ptr<RdmaQueuePair> qp = GetQp(ch.sip, udpport, qIndex);
-	if (qp == NULL)
-		std::cout << "ERROR: QCN NIC cannot find the flow\n";
+	if (qp == NULL) {
+		++m_unmatchedFeedbackCount;
+		return 0;
+	}
+	if (qp->IsFinished()) return 0;
 	// get nic
 	uint32_t nic_idx = GetNicIdxOfQp(qp);
 	Ptr<QbbNetDevice> dev = m_nic[nic_idx].dev;
@@ -435,7 +439,7 @@ int RdmaHw::ReceiveAck(Ptr<Packet> p, CustomHeader &ch) {
 	int i;
 	Ptr<RdmaQueuePair> qp = GetQp(ch.sip, port, qIndex);
 	if (qp == NULL) {
-		std::cout << "ERROR: " << "node:" << m_node->GetId() << ' ' << (ch.l3Prot == 0xFC ? "ACK" : "NACK") << " NIC cannot find the flow\n";
+		++m_unmatchedFeedbackCount;
 		return 0;
 	}
 
@@ -451,7 +455,10 @@ int RdmaHw::ReceiveAck(Ptr<Packet> p, CustomHeader &ch) {
 			qp->Acknowledge(goback_seq);
 		}
 		if (qp->IsFinished()) {
+			if (cnp) ++m_completedAckCnpCount;
 			QpComplete(qp);
+			dev->TriggerTransmit();
+			return 0;
 		}
 	}
 	if (ch.l3Prot == 0xFD) // NACK
@@ -538,21 +545,52 @@ void RdmaHw::RecoverQueue(Ptr<RdmaQueuePair> qp) {
 }
 
 void RdmaHw::QpComplete(Ptr<RdmaQueuePair> qp) {
+	if (!qp || qp->m_completed) return;
 	NS_ASSERT(!m_qpCompleteCallback.IsNull());
-	if (m_cc_mode == 1) {
-		Simulator::Cancel(qp->mlx.m_eventUpdateAlpha);
-		Simulator::Cancel(qp->mlx.m_eventDecreaseRate);
-		Simulator::Cancel(qp->mlx.m_rpTimer);
-	}
+	CancelQueuePair(qp, false);
 
 	// This callback will log info
 	// It may also delete the rxQp on the receiver
 	m_qpCompleteCallback(qp);
 
-	qp->m_notifyAppFinish();
+	if (!qp->m_notifyAppFinish.IsNull()) qp->m_notifyAppFinish();
+	qp->m_notifyAppFinish = Callback<void>();
+	qp->m_applicationPayload = nullptr;
 
 	// delete the qp
 	DeleteQueuePair(qp);
+}
+
+bool RdmaHw::IsQpPortAvailable(uint32_t remote, uint16_t port, uint16_t priorityGroup) const {
+	const auto key = GetQpKey(remote, port, priorityGroup);
+	return m_qpMap.count(key) == 0 && m_cancelledQpKeys.count(key) == 0;
+}
+
+void RdmaHw::CancelQueuePair(Ptr<RdmaQueuePair> qp, bool retirePort) {
+	if (!qp) return;
+	if (retirePort && !qp->m_completed)
+		m_cancelledQpKeys.insert(GetQpKey(qp->dip.Get(), qp->sport, qp->m_pg));
+	qp->m_completed = true;
+	Simulator::Cancel(qp->mlx.m_eventUpdateAlpha);
+	Simulator::Cancel(qp->mlx.m_eventDecreaseRate);
+	Simulator::Cancel(qp->mlx.m_rpTimer);
+	DeleteQueuePair(qp);
+}
+
+void RdmaHw::DoDispose() {
+	while (!m_qpMap.empty()) {
+		auto qp = m_qpMap.begin()->second;
+		CancelQueuePair(qp);
+		qp->m_notifyAppFinish = Callback<void>();
+		qp->m_applicationPayload = nullptr;
+	}
+	m_rxQpMap.clear();
+	m_cancelledQpKeys.clear();
+	m_appReceiveCallbacks.clear();
+	m_qpCompleteCallback = QpCompleteCallback();
+	m_nic.clear();
+	m_node = nullptr;
+	Object::DoDispose();
 }
 
 void RdmaHw::SetLinkDown(Ptr<QbbNetDevice> dev) {
@@ -679,6 +717,7 @@ void RdmaHw::ChangeRate(Ptr<RdmaQueuePair> qp, DataRate new_rate) {
  * Mellanox's version of DCQCN
  *****************************/
 void RdmaHw::UpdateAlphaMlx(Ptr<RdmaQueuePair> q) {
+	if (q->IsFinished()) return;
 #if PRINT_LOG
 	//std::cout << Simulator::Now() << " alpha update:" << m_node->GetId() << ' ' << q->mlx.m_alpha << ' ' << (int)q->mlx.m_alpha_cnp_arrived << '\n';
 	//printf("%lu alpha update: %08x %08x %u %u %.6lf->", Simulator::Now().GetTimeStep(), q->sip.Get(), q->dip.Get(), q->sport, q->dport, q->mlx.m_alpha);
@@ -695,10 +734,12 @@ void RdmaHw::UpdateAlphaMlx(Ptr<RdmaQueuePair> q) {
 	ScheduleUpdateAlphaMlx(q);
 }
 void RdmaHw::ScheduleUpdateAlphaMlx(Ptr<RdmaQueuePair> q) {
+	if (q->IsFinished()) return;
 	q->mlx.m_eventUpdateAlpha = Simulator::Schedule(MicroSeconds(m_alpha_resume_interval), &RdmaHw::UpdateAlphaMlx, this, q);
 }
 
 void RdmaHw::cnp_received_mlx(Ptr<RdmaQueuePair> q) {
+	if (!q || q->IsFinished()) return;
 	q->mlx.m_alpha_cnp_arrived = true; // set CNP_arrived bit for alpha update
 	q->mlx.m_decrease_cnp_arrived = true; // set CNP_arrived bit for rate decrease
 	if (q->mlx.m_first_cnp) {
@@ -716,6 +757,7 @@ void RdmaHw::cnp_received_mlx(Ptr<RdmaQueuePair> q) {
 }
 
 void RdmaHw::CheckRateDecreaseMlx(Ptr<RdmaQueuePair> q) {
+	if (q->IsFinished()) return;
 	ScheduleDecreaseRateMlx(q, 0);
 	if (q->mlx.m_decrease_cnp_arrived) {
 #if PRINT_LOG
@@ -740,10 +782,12 @@ void RdmaHw::CheckRateDecreaseMlx(Ptr<RdmaQueuePair> q) {
 	}
 }
 void RdmaHw::ScheduleDecreaseRateMlx(Ptr<RdmaQueuePair> q, uint32_t delta) {
+	if (q->IsFinished()) return;
 	q->mlx.m_eventDecreaseRate = Simulator::Schedule(MicroSeconds(m_rateDecreaseInterval) + NanoSeconds(delta), &RdmaHw::CheckRateDecreaseMlx, this, q);
 }
 
 void RdmaHw::RateIncEventTimerMlx(Ptr<RdmaQueuePair> q) {
+	if (q->IsFinished()) return;
 	q->mlx.m_rpTimer = Simulator::Schedule(MicroSeconds(m_rpgTimeReset), &RdmaHw::RateIncEventTimerMlx, this, q);
 	RateIncEventMlx(q);
 	q->mlx.m_rpTimeStage++;

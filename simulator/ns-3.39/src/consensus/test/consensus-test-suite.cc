@@ -1511,10 +1511,26 @@ class ConsensusEndToEndMatrixTestCase : public TestCase {
                 config.bidlAttackTargetExecutors = 0;
                 ConsensusRunResult attacked = ConsensusRunner().Run(config, false);
                 NS_TEST_ASSERT_MSG_EQ(attacked.success, true, "BIDL notification mode broke attack recovery");
-                if (assisted)
-                    NS_TEST_ASSERT_MSG_EQ((attacked.iorsUnauthorized > 0), true, "IORS missed the malicious broadcaster");
+                if (assisted) {
+                    NS_TEST_ASSERT_MSG_EQ(attacked.iorsUnauthorized, 0, "IORS relied on sender authorization");
+                    NS_TEST_ASSERT_MSG_EQ((attacked.iorsEquivocation > 0), true,
+                                          "IORS missed the conflicting sequence/digest binding");
+                }
             }
         }
+        config.bidlCompactOrderNotifications = true;
+        config.bidlAttackMode = 1;
+        config.bidlAttackEnabled = true;
+        config.bidlAttackTargetExecutors = 0;
+        config.iorsMode = 1;
+        config.iorsTerminalGate = false;
+        ConsensusRunResult sequenceTampering = ConsensusRunner().Run(config, false);
+        NS_TEST_ASSERT_MSG_EQ(sequenceTampering.success, true, "Sequence-tampering workload did not complete");
+        NS_TEST_ASSERT_MSG_EQ(sequenceTampering.iorsUnauthorized, 0, "IORS classified the attacker by sender identity");
+        NS_TEST_ASSERT_MSG_EQ((sequenceTampering.iorsEquivocation > 0), true,
+                              "IORS missed one digest mapped to multiple sequences");
+        NS_TEST_ASSERT_MSG_EQ((sequenceTampering.iorsMarked > 0), true,
+                              "IORS did not mark the conflicting sequence mapping");
     }
 
     void DoRun() override {
@@ -1652,6 +1668,108 @@ class BidlRepairSourceTestCase : public TestCase {
     }
     std::map<uint8_t, uint64_t> m_reasons;
     uint64_t m_bytes{0};
+};
+
+class BidlCanonicalRecoveryTestCase : public TestCase {
+  public:
+    BidlCanonicalRecoveryTestCase()
+        : TestCase("BIDL certified blocks recover missing and sequence-poisoned transactions") {}
+  private:
+    void CheckRecovery(bool missing, bool lateVerification) {
+        auto app = CreateObject<BidlApplication>();
+        auto transport = CreateObject<RecordingConsensusTransport>();
+        app->SetNodeId(100);
+        app->SetRole(BIDL_EXECUTOR);
+        app->SetOrdererIds({0, 1, 2, 3});
+        app->SetExecutorIds({100});
+        app->SetSequencerIds({200});
+        app->SetTransport(transport);
+        app->SetResourceModel(CreateObject<ConsensusResourceModel>());
+        app->m_running = true;
+        app->m_compactOrderNotifications = true;
+        app->m_faultTolerance = 1;
+        ClientRequest first{1000, 1, 256, 1, 101};
+        ClientRequest second{1000, 2, 256, 1, 102};
+        BidlApplication::SignRequest(first);
+        BidlApplication::SignRequest(second);
+        const std::vector<BidlTransactionRecord> canonical{{1, first, 1}, {2, second, 1}};
+        uint64_t digest = 0;
+        for (const auto& record : canonical)
+            digest ^= record.request.digest + 0x9e3779b97f4a7c15ULL + (digest << 6) + (digest >> 2);
+        if (!missing) {
+            app->m_transactions[2] = first;
+            app->m_digestSequences[first.digest] = 2;
+        }
+        if (lateVerification) {
+            app->m_transactions[1] = first;
+            app->m_digestSequences[first.digest] = 1;
+            app->m_executedTransactions.insert(1);
+            app->m_executedTransactions.insert(2);
+            app->m_transactionExecutionTimes[1] = Seconds(0);
+            app->m_transactionExecutionTimes[2] = Seconds(0);
+            app->m_nextExecutionSequence = 3;
+        }
+        ConsensusMessage block;
+        block.type = ConsensusMessageType::BIDL_ORDERED_BLOCK;
+        block.instanceId = 1;
+        block.transactionCount = 2;
+        block.digest = digest;
+        for (uint32_t sender : {0U, 1U, 2U}) {
+            block.senderId = sender;
+            app->HandleExecutorMessage(block);
+        }
+        if (lateVerification) {
+            app->m_blocks.at(1).requiresReexecution = false;
+            ConsensusMessage repair;
+            repair.type = ConsensusMessageType::BIDL_TRANSACTION_REPAIR;
+            repair.senderId = 200;
+            repair.instanceId = 2;
+            repair.clientId = second.clientId;
+            repair.requestId = second.requestId;
+            repair.digest = second.digest;
+            repair.payloadSize = second.payloadSize;
+            repair.transactionCount = 1;
+            repair.payloadBytes = BidlApplication::EncodeTransactions({canonical[1]});
+            app->CompleteTransactionVerification(repair);
+            NS_TEST_ASSERT_MSG_EQ(app->m_blocks.at(1).approvalScheduled, true,
+                                  "Late verified input did not resume an already executed ordered block");
+        } else {
+            app->RequestCanonicalBlock(1);
+            uint32_t canonicalRequests = 0;
+            for (const auto& packet : transport->packets) {
+                ConsensusMessage request;
+                if (ConsensusMessage::FromPacket(packet, request) &&
+                    request.type == ConsensusMessageType::BIDL_BLOCK_REQUEST) ++canonicalRequests;
+            }
+            NS_TEST_ASSERT_MSG_EQ((canonicalRequests > 0), true,
+                                  "An incomplete certified block never requested canonical transactions");
+            block.payloadBytes = BidlApplication::EncodeTransactions(canonical);
+            for (uint32_t sender : {0U, 1U}) {
+                block.senderId = sender;
+                app->HandleExecutorMessage(block);
+            }
+            NS_TEST_ASSERT_MSG_EQ(app->m_blocks.at(1).canonicalTransactions.empty(), true,
+                                  "A minority canonical payload bypassed the ordering quorum");
+            block.senderId = 2;
+            app->HandleExecutorMessage(block);
+        }
+        Simulator::Stop(MilliSeconds(5));
+        Simulator::Run();
+        NS_TEST_ASSERT_MSG_EQ(app->ComputeBlockDigest(1, 2), digest,
+                              "Certified contents did not replace missing or poisoned local input");
+        NS_TEST_ASSERT_MSG_EQ(app->m_blocks.at(1).resultSubmitted, true,
+                              "Recovered execution did not report its result to orderers");
+        if (!lateVerification)
+            NS_TEST_ASSERT_MSG_EQ(app->m_blocks.at(1).reexecutionComplete, true,
+                                  "Canonical recovery did not finish corrective execution");
+        app->m_running = false;
+        Simulator::Destroy();
+    }
+    void DoRun() override {
+        CheckRecovery(true, false);
+        CheckRecovery(false, false);
+        CheckRecovery(true, true);
+    }
 };
 
 class BidlAuthenticationTestCase : public TestCase {
@@ -2314,6 +2432,7 @@ class ZyzzyvaRecoveryTestSuite : public TestSuite {
         AddTestCase(new IorsWireAuthenticationTestCase(), TestCase::QUICK);
         AddTestCase(new BidlAuthenticationTestCase(), TestCase::QUICK);
         AddTestCase(new BidlRepairSourceTestCase(), TestCase::QUICK);
+        AddTestCase(new BidlCanonicalRecoveryTestCase(), TestCase::QUICK);
         AddTestCase(new BidlClientAbortTestCase(), TestCase::QUICK);
         AddTestCase(new ZyzzyvaClientCertificateTestCase(), TestCase::QUICK);
         AddTestCase(new ZyzzyvaRecoveryTestCase(), TestCase::QUICK);

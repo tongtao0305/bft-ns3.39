@@ -193,7 +193,8 @@ namespace ns3 {
         std::vector<uint8_t> authentication;
 
         Ptr<Packet> ToPacket() const;
-        static bool FromPacket(Ptr<Packet> packet, ConsensusMessage& message);
+        static bool FromPacket(Ptr<Packet> packet, ConsensusMessage& message, bool includePayload = true);
+        static void StripIorsExtension(Ptr<Packet> packet);
 
         bool operator==(const ConsensusMessage& other) const;
         bool operator!=(const ConsensusMessage& other) const;

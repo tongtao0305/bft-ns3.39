@@ -102,6 +102,8 @@ namespace ns3 {
     class BidlApplication : public Application {
         friend class BidlAuthenticationTestCase;
         friend class BidlRepairSourceTestCase;
+        friend class BidlCanonicalRecoveryTestCase;
+        friend class BidlReplayAdmissionTestCase;
         public:
         static TypeId GetTypeId();
 
@@ -111,6 +113,7 @@ namespace ns3 {
         BidlApplication();
 
         void SetNodeId(uint32_t nodeId);
+        uint32_t GetNodeId() const { return m_nodeId; }
         void SetRole(BidlRole role);
         void SetOrdererIds(const std::vector<uint32_t>& ids);
         void SetExecutorIds(const std::vector<uint32_t>& ids);
@@ -163,6 +166,7 @@ namespace ns3 {
         void SequenceTransaction(const ClientRequest& transaction);
         void ReplyToClient(uint64_t sequence, uint64_t blockId);
         void VerifyTransaction(ConsensusMessage message);
+        bool IsTransactionReplay(const ConsensusMessage& message) const;
         void CompleteTransactionVerification(ConsensusMessage message);
         void TryProcessPendingExecutorMessages(uint64_t blockId);
         void RequestMissingTransactions(uint64_t first, uint64_t last);
@@ -299,6 +303,7 @@ namespace ns3 {
         std::set<uint64_t> m_invalidTransactions;
         std::set<uint64_t> m_verificationPending;
         std::map<uint64_t, uint64_t> m_verificationDigests;
+        std::map<uint64_t, uint64_t> m_verificationDigestSequences;
         std::map<uint64_t, EventId> m_gapRequestEvents;
         std::map<uint64_t, uint32_t> m_gapRequestAttempts;
         uint64_t m_highestObservedTransactionSequence{0};

@@ -161,6 +161,7 @@ uint64_t RdmaQueuePair::HpGetCurWin() {
 }
 
 bool RdmaQueuePair::IsFinished() {
+	if (m_completed) return true;
 
 	if (Simulator::Now() > stopTime)
 		return true;

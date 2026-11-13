@@ -11,14 +11,13 @@
 #include "ns3/inet-socket-address.h"
 #include "ns3/simulator.h"
 #include "ns3/switch-node.h"
-#include "ns3/qbb-channel.h"
-#include "ns3/qbb-net-device.h"
 
 #include <algorithm>
 #include <array>
 #include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <csignal>
 #include <fstream>
 #include <map>
 #include <set>
@@ -27,37 +26,15 @@
 #include <vector>
 
 namespace ns3 {
+    namespace {
+        volatile std::sig_atomic_t stopRequested = 0;
+    }
+
+    void RequestConsensusStop(int signal) { stopRequested = signal; }
+    bool WasConsensusStopRequested() { return stopRequested != 0; }
 
     // 匿名命名空间，仅供当前文件使用的辅助函数
     namespace {
-
-        void InstallIorsSources(const ConsensusTopology& topology, const ConsensusEndpointMap& endpoints) {
-            for (uint32_t index = 0; index < topology.switches.GetN(); ++index) {
-                Ptr<SwitchNode> node = DynamicCast<SwitchNode>(topology.switches.Get(index));
-                for (const auto& endpoint : endpoints) {
-                    InetSocketAddress address = InetSocketAddress::ConvertFrom(endpoint.second);
-                    node->SetIorsSource(address.GetIpv4().Get(), endpoint.first);
-                }
-            }
-            for (const auto& endpoint : endpoints) {
-                uint32_t ip = InetSocketAddress::ConvertFrom(endpoint.second).GetIpv4().Get();
-                for (uint32_t physical = 0; physical < topology.nodes.GetN(); ++physical) {
-                    if (physical >= topology.nodeAddresses.size() || topology.nodeAddresses[physical].Get() != ip) continue;
-                    Ptr<Node> host = topology.nodes.Get(physical);
-                    for (uint32_t index = 0; index < host->GetNDevices(); ++index) {
-                        Ptr<QbbNetDevice> nic = DynamicCast<QbbNetDevice>(host->GetDevice(index));
-                        if (!nic) continue;
-                        Ptr<QbbChannel> channel = DynamicCast<QbbChannel>(nic->GetChannel());
-                        if (!channel || channel->GetNDevices() != 2) continue;
-                        Ptr<QbbNetDevice> first = channel->GetQbbDevice(0);
-                        Ptr<QbbNetDevice> second = channel->GetQbbDevice(1);
-                        Ptr<QbbNetDevice> peer = first == nic ? second : first;
-                        Ptr<SwitchNode> edge = DynamicCast<SwitchNode>(peer->GetNode());
-                        if (edge) edge->SetIorsIngressPort(peer->GetIfIndex(), ip);
-                    }
-                }
-            }
-        }
 
         // 将网卡、链路速率、队列规则、交换机策略和 RDMA 背景流量连接到统计模块
         void AttachNetworkStatistics(Ptr<ConsensusStatistics> statistics, const ConsensusExperimentConfig& config,
@@ -91,7 +68,7 @@ namespace ns3 {
             const Time ready = start + NanoSeconds(1);
             const bool trace = config.workload == "trace" || (config.workload == "auto" && config.HasLegacyBlockchainWorkload());
             if (trace) {
-                for (const LegacyFlowRecord& flow : ReadLegacyFlowFile(config.flowFile)) {
+                for (const LegacyFlowRecord& flow : GetCachedLegacyFlowFile(config.flowFile)) {
                     if (flow.applicationId != 1) {
                         continue;
                     }
@@ -254,7 +231,8 @@ namespace ns3 {
                    << "  \"confirmed_safety_error\": " << (result.confirmedSafetyConflict ? "true" : "false") << ",\n"
                    << "  \"replica_progress_min\": " << result.replicaProgressMin << ",\n"
                    << "  \"replica_progress_max\": " << result.replicaProgressMax << ",\n"
-                   << "  \"status\": \"" << (result.success ? "complete" : "incomplete") << "\"\n"
+                   << "  \"interrupted\": " << (result.interrupted ? "true" : "false") << ",\n"
+                   << "  \"status\": \"" << (result.interrupted ? "interrupted" : result.success ? "complete" : "incomplete") << "\"\n"
                    << "}\n";
         }
 
@@ -329,6 +307,7 @@ namespace ns3 {
             ConsensusRunResult result = Run(current, writeIndividualResults);
             batch.success = batch.success && result.success;
             batch.runs.push_back(result);
+            if (result.interrupted) break;
         }
 
         std::ofstream output(basePrefix + "-aggregate.csv");
@@ -412,10 +391,6 @@ namespace ns3 {
             endpoints.emplace(firstClientId + client, InetSocketAddress(topology.nodeAddresses[physicalId], port));
         }
 
-        if (config.iorsMode != 0) {
-            InstallIorsSources(topology, endpoints);
-        }
-
         // 安装副本和客户端应用
         ConsensusHelper helper;
         config.ConfigureHelper(helper, &topology);
@@ -457,6 +432,7 @@ namespace ns3 {
         Ptr<ConsensusStatistics> statistics = CreateObject<ConsensusStatistics>();
         statistics->SetMeasurementWindow(measurementStart, measurementStop);
         statistics->SetDiagnosticEvents(config.diagnosticEvents);
+        statistics->SetDetailedEvents(config.transactionPathEvents, config.backgroundFlowEvents, config.iorsMode != 0);
         statistics->SetEventOutputPrefix(config.outputPrefix);
         for (const auto& client : workloadClients) {
             statistics->AttachClient(client.application);
@@ -538,7 +514,8 @@ namespace ns3 {
                 }
             }
         }
-        result.success = result.completedRequests == expectedRequests;
+        result.interrupted = WasConsensusStopRequested();
+        result.success = !result.interrupted && result.completedRequests == expectedRequests;
         if (config.architecture == "zyzzyva") {
             result.success &= result.replicaStateAgreement && result.replicaProgressMin >= expectedRequests;
             if (!config.zyzzyvaEquivocationEnabled) result.success &= result.replicaProgressMax == expectedRequests;
@@ -599,9 +576,6 @@ namespace ns3 {
         }
 
         // 将配置字段写入对象工厂
-        if (config.iorsMode != 0) {
-            InstallIorsSources(topology, endpoints);
-        }
         ConsensusHelper helper;
         config.ConfigureHelper(helper, &topology);
         helper.SetClientAttribute("ReplyQuorum", UintegerValue(config.bidlNativeSequencing ? config.faultTolerance + 1 : 1));
@@ -676,6 +650,7 @@ namespace ns3 {
         Ptr<ConsensusStatistics> statistics = CreateObject<ConsensusStatistics>();
         statistics->SetMeasurementWindow(measurementStart, measurementStop);
         statistics->SetDiagnosticEvents(config.diagnosticEvents);
+        statistics->SetDetailedEvents(config.transactionPathEvents, config.backgroundFlowEvents, config.iorsMode != 0);
         statistics->SetEventOutputPrefix(config.outputPrefix);
         statistics->AttachBidlApplications(applications);
         for (const auto& client : workloadClients) {
@@ -723,6 +698,8 @@ namespace ns3 {
                              ? result.completedTransactions == expectedRequests * config.transactionsPerRequest
                              : result.completedRequests == expectedRequests;
         const uint64_t expectedTransactions = expectedRequests * config.transactionsPerRequest;
+        result.interrupted = WasConsensusStopRequested();
+        result.success &= !result.interrupted;
         result.success &= result.replicaStateAgreement && result.replicaProgressMin >= expectedTransactions &&
                           result.replicaProgressMax >= expectedTransactions;
         if (writeResults) {

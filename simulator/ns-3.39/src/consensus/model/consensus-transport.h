@@ -2,6 +2,7 @@
 #define CONSENSUS_TRANSPORT_H
 
 #include "consensus-message.h"
+#include "ns3/rdma-queue-pair.h"
 
 #include "ns3/address.h"
 #include "ns3/callback.h"
@@ -199,13 +200,16 @@ namespace ns3 {
         };
 
         void HandleFragment(uint32_t sourceIp, uint16_t sourcePort, uint16_t priorityGroup, uint32_t sequence, Ptr<Packet> fragment);
-        void HandleSendComplete(uint32_t peerId, uint16_t sourcePort);
-        uint16_t AllocateSourcePort(uint32_t peerId);
+        void HandleSendComplete(uint32_t peerId, uint16_t sourcePort, uint16_t priorityGroup);
+        uint16_t AllocateSourcePort(uint32_t peerId, uint16_t priorityGroup);
+        void RetryPendingSends();
         void SendNow(uint32_t peerId, Ptr<Packet> packet, ConsensusTransportMetadata metadata);
 
         Ptr<Node> m_node;
         Ptr<RdmaDriver> m_driver;
         std::map<FlowKey, Ptr<Packet>> m_reassembly;
+        std::map<FlowKey, Ptr<RdmaQueuePair>> m_ownedQueuePairs;
+        EventId m_sourcePortRetryEvent;
         // RDMA QP identity includes the remote address, so the same source
         // port is independent for different peers. Keep the in-flight set
         // scoped to a peer to avoid exhausting the 16-bit port space globally.

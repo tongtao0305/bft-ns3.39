@@ -122,6 +122,19 @@ def background_metrics(prefix):
     import sqlite3
     import tempfile
     event_path = Path(str(prefix) + '-background-events.csv')
+    aggregate_path = Path(str(prefix) + '-background-summary.csv')
+    if aggregate_path.exists() and next(iter(csv_rows(event_path)), None) is None:
+        result = []
+        for row in csv_rows(aggregate_path):
+            item = dict(row)
+            for key in ('started', 'completed', 'incomplete'):
+                item[key] = int(item[key])
+            for key in ('completion_fraction', 'mean_us', 'max_us', 'p50_us', 'p95_us', 'p99_us'):
+                item[key] = float(item[key])
+            item['samples'] = item['completed']
+            item['status'] = 'aggregate-only' if item['started'] else 'no-started-flows'
+            result.append(item)
+        return result
     if not event_path.exists():
         values = [float(r['fct_us']) for r in csv_rows(str(prefix) + '-background.csv')]
         return [{"size_class": "all", "status": "legacy-completions-only",
@@ -165,6 +178,8 @@ def background_metrics(prefix):
 
 
 def path_metrics(prefix, config):
+    if config.get('transaction_path_events') is False and not config.get('diagnostic_events', False):
+        return [{'status': 'not-recorded', 'enable_option': 'transactionPathEvents'}]
     from array import array
     from collections import deque
     pending, groups = {}, {}

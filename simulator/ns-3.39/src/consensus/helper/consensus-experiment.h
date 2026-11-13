@@ -12,6 +12,8 @@
 #include "ns3/queue-disc-container.h"
 
 #include <cstdint>
+#include <chrono>
+#include <array>
 #include <fstream>
 #include <limits>
 #include <map>
@@ -72,6 +74,7 @@ namespace ns3 {
 
     LegacyTopologySpec ReadLegacyTopologyFile(const std::string& path);
     std::vector<LegacyFlowRecord> ReadLegacyFlowFile(const std::string& path);
+    const std::vector<LegacyFlowRecord>& GetCachedLegacyFlowFile(const std::string& path);
 
     /** Configures switch-local queue, ECN, PFC headroom, and CC behavior. */
     class ConsensusSwitchPolicy : public Object {
@@ -192,6 +195,8 @@ namespace ns3 {
         std::string zyzzyvaMaliciousReplicaIds{"0"};
         std::string outputPrefix{"consensus-results"};
         bool diagnosticEvents{false};
+        bool transactionPathEvents{false};
+        bool backgroundFlowEvents{false};
         uint32_t replicaCount{4};
         uint32_t clientCount{1};
         uint32_t clientPhysicalId{std::numeric_limits<uint32_t>::max()};
@@ -373,6 +378,11 @@ namespace ns3 {
 
         void SetMeasurementWindow(Time start, Time stop);
         void SetDiagnosticEvents(bool enabled) { m_diagnosticEvents = enabled; }
+        void SetDetailedEvents(bool paths, bool background, bool trackIors) {
+            m_transactionPathEvents = paths;
+            m_backgroundFlowEvents = background;
+            m_trackIorsCandidates = trackIors;
+        }
         void SetEventOutputPrefix(const std::string& prefix);
         void AttachClient(Ptr<ConsensusClientApplication> client);
         void AttachReplicas(const ApplicationContainer& applications);
@@ -489,6 +499,10 @@ namespace ns3 {
         void OnTransactionFinalized(uint32_t node, uint64_t sequence, uint64_t block, uint32_t client, uint64_t request, uint32_t transactions);
         void OnBackgroundFlowStarted(uint32_t sender, uint32_t receiver, uint64_t flow, uint32_t bytes);
         void SampleReplicaBacklog();
+        void SampleRuntime();
+        void FlushRuntimeCheckpoint() const;
+        void DoDispose() override;
+        EventId m_replicaBacklogEvent;
         std::vector<Ptr<ConsensusApplication>> m_replicaApplications;
         std::map<std::pair<uint32_t, uint64_t>, uint8_t> m_completionPaths;
         mutable std::ofstream m_finalizedStream, m_backgroundEventStream, m_replicaBacklogStream;
@@ -512,6 +526,16 @@ namespace ns3 {
         std::vector<RequestSample> m_requestSamples;
         std::vector<PhaseSample> m_phaseSamples;
         std::vector<BackgroundFlowSample> m_backgroundFlows;
+        uint64_t m_backgroundCompletedCount{0};
+        std::map<int64_t, uint64_t> m_backgroundFctHistogram;
+        struct BackgroundAggregate {
+            uint64_t started{0};
+            uint64_t completed{0};
+            uint64_t totalLatencyNs{0};
+            uint64_t maxLatencyNs{0};
+            std::map<int64_t, uint64_t> histogram;
+        };
+        std::array<BackgroundAggregate, 3> m_backgroundAggregates;
         struct IorsEventSample { uint32_t switchId; uint8_t protocol; uint32_t senderId; uint64_t epoch; uint64_t instance; uint64_t digest; uint8_t evidence; Time time; };
         std::vector<IorsEventSample> m_iorsEvents;
         struct CandidateEventSample { Time time; uint32_t senderId; uint32_t receiverId; uint16_t type;
@@ -586,6 +610,13 @@ namespace ns3 {
         Time m_measurementStop;
         bool m_hasSubmission;
         bool m_diagnosticEvents{false};
+        bool m_transactionPathEvents{false};
+        bool m_backgroundFlowEvents{false};
+        bool m_trackIorsCandidates{false};
+        EventId m_runtimeEvent;
+        std::chrono::steady_clock::time_point m_runtimeStarted;
+        mutable std::ofstream m_runtimeStream;
+        mutable std::ofstream m_replicaCommitStream;
         mutable std::ofstream m_candidateEventStream;
         mutable std::ofstream m_bidlPathStream;
         mutable std::ofstream m_bidlLiveProgressStream;

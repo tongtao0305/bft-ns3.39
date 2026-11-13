@@ -10,13 +10,22 @@ number to each client transaction and broadcasts it to every orderer and executo
 transactions speculatively in sequence order. The ordering leader groups consecutive transactions by
 `batchSize` or `batchTimeoutMs`, then PBFT orders only their digest list. An executor persists and
 commits a block after ordering, execution, and 2f+1 matching Orderer Persist vectors have completed.
-Missing sequenced transactions are requested from the sequencer with bounded retries. Inconsistent
-executor result vectors cause an abort notification. A transaction whose
+Missing sequenced transactions are requested from the sequencer with bounded retries. Once an
+ordering quorum certifies a block, missing or conflicting local transactions instead trigger retrieval
+of its canonical contents and corrective execution, following paper section 4.3 and Algorithm 2.
+Compact notifications retain this fallback: canonical contents must have their own matching ordering
+quorum before replacing speculative input. Verified late arrivals also recheck their ordered block.
+Inconsistent executor result vectors cause an abort notification. A transaction whose
 digest is `BidlApplication::INVALID_TRANSACTION_DIGEST` is treated as malicious or incorrect by the
 lightweight fault model; its block incurs one corrective re-execution before persistence. Retransmitted
 client requests keep their original sequence, and every orderer submits the same block candidate to its
 local PBFT engine so a new primary can continue after a view change. Window throughput counts
 transactions completed inside the measurement window; submission-cohort latency follows slow requests through cooldown.
+
+The current execution model treats every configured executor as a required participant for every
+block. It does not model the paper's per-transaction related-organization lists or delegate selection.
+Collecting all execution results is distinct from collecting 2f+1 orderer Persist votes; reducing the
+former to 2f+1 executor results would change approval semantics rather than repair recovery.
 
 Built-in engines, transports, topologies, and switch policies are selected directly from the
 experiment configuration. Invalid combinations such as RDMA over a TCP-only topology are rejected
@@ -144,25 +153,26 @@ IORS configurations are in `examples/consensus/configs/baseline/`.
 `iorsMode` is independent of `iorsTerminalGate` and `bidlDenylistEnabled`:
 
 - `0` disables switch inspection; `1` marks conflicts; `2` marks and applies a
-  fixed bounded wait; `3` uses a bounded RTT estimate. Only an unauthorized
-  BIDL sequence binding can be actively held. A Zyzzyva double proposal is
-  marked and forwarded without choosing a winner.
+  fixed bounded wait; `3` uses a bounded RTT estimate. BIDL, Zyzzyva, and EZBFT
+  candidates use both sequence-to-digest and digest-to-sequence bindings. BIDL
+  client/request-to-sequence state is retained but does not trigger marking.
+  Conflicting packets are marked and forwarded without choosing a winner.
 - The terminal gate prefers the first unmarked candidate at each sequence that
   passes ordinary protocol verification. Its timeout releases the earliest
   marked candidate to the ordinary protocol path.
-- Marked packets bypass candidate state at every subsequent switch. Missing
-  source evidence, fragmented frames, expired/full state, or fingerprint
-  collisions pass through without IORS intervention. The extension sits outside
+- Marked packets bypass candidate state at every subsequent switch. Fragmented
+  frames, expired/full state, or fingerprint collisions pass through without
+  IORS intervention. The extension sits outside
   the protocol signature. A receiver with `IorsWireEnabled=false` removes the
   extension at the RDMA reassembly edge before application delivery.
 
-The switch only inspects packet bytes, IP source, ingress port, and an installed
-source/port map. Its source map is a simulation of data-center admission
-configuration, not a simulator identity tag or a cryptographic authentication
-decision. A forged source field from an authorized host on an indistinguishable
-route cannot be proved malicious by this evidence alone. These experiments
-use the updated parser; the edge-strip path provides compatibility for a
-nonparticipating application behind the updated RDMA transport.
+The switch does not authorize or authenticate sender identities. It compares
+the sequence and digest fields carried in supported packets; this is conflict
+detection, not proof of which conflicting candidate is valid. State is local to
+each switch, so detection requires both conflicting packets to traverse that
+switch before their bindings expire. These experiments use the updated parser;
+the edge-strip path provides compatibility for a nonparticipating application
+behind the updated RDMA transport.
 
 Zyzzyva has signed ORDER-REQ, speculative responses, commit certificates,
 gap repair, checkpoints, and view-change records in the packet-level model.
@@ -185,7 +195,9 @@ the paper's separate organization model, all endorsement cryptography, or
 the exact view-change piggyback wire format.
 
 The manifest records IORS observed/marked/waited/already-marked and state
-bypass counters, along with the selected recovery rule and denylist size.
+bypass counters, along with the selected recovery rule and denylist size. The
+legacy unauthorized-sender counter remains zero because IORS marking is based
+only on sequence/digest conflicts.
 
 ### Three-protocol IORS comparison
 
@@ -259,10 +271,10 @@ aborted and completed sample counts; unresolved requests have no invented latenc
 `request-events.csv` includes `transaction_count` for weighted throughput analysis.
 
 BIDL cached retransmissions use `BIDL_TRANSACTION_REPAIR` (65), distinct from new
-sequencing broadcasts (30). IORS allows cache repairs from the configured gateway
-and orderers while retaining source mapping and the same epoch/sequence/content
-bindings. Executors reject broadcaster-originated repair messages. Client ingress
-already uses `CLIENT_REQUEST`; the corrected false-positive path was cached repair.
+sequencing broadcasts (30). IORS applies the same epoch/sequence/digest bindings
+to both message types. Executors reject broadcaster-originated repair messages.
+Client ingress already uses `CLIENT_REQUEST`; the corrected false-positive path
+was cached repair.
 
 Zyzzyva phase 14 means NEW-VIEW installed, 15 application recovery started,
 16 undo completed, 17 application state recovery completed, and 18 view change
@@ -272,3 +284,49 @@ that a subsequent throughput window has returned to its pre-attack rate.
 Recovery phases and completed background flows are retained through cooldown.
 The evaluator requires each correct replica's phase 17 for the same target view
 before reporting recovery completion; missing events remain missing.
+# Runtime lifecycle and large Hadoop traces
+
+Completed RDMA queue pairs cancel all DCQCN timers before notifying applications.
+Final ACK congestion feedback cannot restart a completed flow; stopping a transport
+cancels its owned queue pairs. Source ports are checked against the shared NIC QP
+table, including other transports on the same physical host.
+Cancelled QP keys remain unavailable until NIC disposal so delayed feedback cannot
+complete a new flow that reused the cancelled flow's key.
+
+BIDL rejects digest replays against both verified transactions and pending
+verification before reserving another sequence or scheduling CPU work. Recovery
+from genuine missing or conflicting transactions still follows the certified block.
+
+Individual `transactionPathEvents` and `backgroundFlowEvents` default to `false`.
+Enable either explicitly when analyzing individual packets or background flows;
+`diagnosticEvents=true` enables both as well. Background completion counts and
+microsecond FCT percentiles remain exact with detailed flow recording disabled.
+Header-only background decoding preserves original flow sizes and packet timing.
+`*-background-summary.csv` preserves completion counts and microsecond FCT
+percentiles by size class without retaining individual flows. The evaluator uses
+these aggregates when detailed events are disabled and explicitly reports
+disabled path measurements as `not-recorded`.
+
+Every run writes `*-runtime.csv` checkpoints with simulation time, wall time,
+processed events, active QPs, active DCQCN timers, completed-ACK congestion counts,
+unmatched feedback, and global request/background completion counts. `*-replica-progress.csv` records
+actual committed transaction and block counts per BIDL executor. These counters
+are distinct from the global count in `*-bidl-progress.csv`. Event streams are
+flushed at checkpoints and at final result generation.
+
+The `bidl-experiment` executable handles SIGINT/SIGTERM cooperatively: the signal
+handler only sets a flag; packet/statistics callbacks stop simulation and write
+final results with manifest status `interrupted`. SIGKILL cannot finalize results.
+The Python launcher saves binary/dynamic-library hashes in
+`runtime-provenance.json`, including effective configuration and input file hashes,
+and the current tracked source diff in `source-diff.patch`.
+
+Slurm `prepare --binary PATH` records an explicit executable under the ns-3 root
+and passes it to every task. Compile to a dedicated output directory for each
+campaign so later builds cannot replace its executable or shared libraries.
+Preparation fingerprints the selected executable and its ns-3 dependencies;
+each task verifies those fingerprints before starting.
+
+The configured observation window and congestion-control periods are unchanged.
+Do not infer algorithmic performance gains from runs using different observation
+windows, logging settings, load traces, or executable/library hashes.

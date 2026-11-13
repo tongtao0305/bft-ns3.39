@@ -257,7 +257,17 @@ namespace ns3 {
         return packet;
     }
 
-    bool ConsensusMessage::FromPacket(Ptr<Packet> packet, ConsensusMessage& message) {
+    void ConsensusMessage::StripIorsExtension(Ptr<Packet> packet) {
+        ConsensusMessage message;
+        if (!FromPacket(packet, message, false) || !message.iorsPresent) return;
+        ConsensusHeader header;
+        packet->RemoveHeader(header);
+        packet->RemoveAtStart(IORS_EXTENSION_SIZE);
+        header.SetPayloadLength(packet->GetSize());
+        packet->AddHeader(header);
+    }
+
+    bool ConsensusMessage::FromPacket(Ptr<Packet> packet, ConsensusMessage& message, bool includePayload) {
         if (!packet) {
             return false;
         }
@@ -297,7 +307,7 @@ namespace ns3 {
         message.instanceId = header.GetInstanceId();
         message.messageId = header.GetMessageId();
         message.payloadSize = copy->GetSize();
-        message.payloadBytes.resize(copy->GetSize());
+        message.payloadBytes.resize(includePayload ? copy->GetSize() : 0);
         if (!message.payloadBytes.empty()) {
             copy->CopyData(message.payloadBytes.data(), message.payloadBytes.size());
         }

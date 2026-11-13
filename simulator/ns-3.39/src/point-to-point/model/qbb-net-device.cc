@@ -103,6 +103,7 @@ Ptr<Packet> RdmaEgressQueue::DequeueQindex(int qIndex) {
 	return 0;
 }
 int RdmaEgressQueue::GetNextQindex(bool paused[]) {
+	m_nextAvailableTime = Simulator::GetMaximumSimulationTime();
 	bool found = false;
 	uint32_t qIndex;
 	if (!paused[ack_q_idx] && m_ackQ->GetNPackets() > 0)
@@ -119,13 +120,17 @@ int RdmaEgressQueue::GetNextQindex(bool paused[]) {
 			for (qIndex = 1; qIndex <= fcount; qIndex++) {
 				uint32_t idx = (qIndex + m_rrlast) % fcount;
 				Ptr<RdmaQueuePair> qp = m_qpGrp->Get(idx);
+				if (qp->IsFinished()) {
+					min_finish_id = idx < min_finish_id ? idx : min_finish_id;
+					continue;
+				}
 				if (!paused[qp->m_pg] && qp->GetBytesLeft() > 0 && !qp->IsWinBound()) {
-					if (m_qpGrp->Get(idx)->m_nextAvail.GetTimeStep() > Simulator::Now().GetTimeStep()) //not available now
+					if (qp->m_nextAvail > Simulator::Now()) {
+						m_nextAvailableTime = Min(m_nextAvailableTime, qp->m_nextAvail);
 						continue;
+					}
 					res = idx;
 					break;
-				} else if (qp->IsFinished()) {
-					min_finish_id = idx < min_finish_id ? idx : min_finish_id;
 				}
 			}
 
@@ -375,13 +380,7 @@ QbbNetDevice::DequeueAndTransmit(void)
 			totalBytesSent += p->GetSize();
 		} else { // no packet to send
 			NS_LOG_INFO("PAUSE prohibits send at node " << m_node->GetId());
-			Time t = Simulator::GetMaximumSimulationTime();
-			for (uint32_t i = 0; i < m_rdmaEQ->GetFlowCount(); i++) {
-				Ptr<RdmaQueuePair> qp = m_rdmaEQ->GetQp(i);
-				if (qp->GetBytesLeft() == 0)
-					continue;
-				t = Min(qp->m_nextAvail, t);
-			}
+			Time t = m_rdmaEQ->m_nextAvailableTime;
 			if (m_nextSend.IsExpired() && t < Simulator::GetMaximumSimulationTime() && t > Simulator::Now()) {
 				m_nextSend = Simulator::Schedule(t - Simulator::Now(), &QbbNetDevice::DequeueAndTransmit, this);
 			}

@@ -56,6 +56,13 @@ void RdmaDriver::SetNode(Ptr<Node> node){
 	m_node = node;
 }
 
+void RdmaDriver::DoDispose() {
+	if (m_rdma) m_rdma->Dispose();
+	m_rdma = nullptr;
+	m_node = nullptr;
+	Object::DoDispose();
+}
+
 void RdmaDriver::SetRdmaHw(Ptr<RdmaHw> rdma){
 	m_rdma = rdma;
 }

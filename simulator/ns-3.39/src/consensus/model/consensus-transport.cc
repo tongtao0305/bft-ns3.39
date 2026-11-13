@@ -465,6 +465,13 @@ namespace ns3 {
     }
 
     void RdmaConsensusTransport::Stop() {
+        Simulator::Cancel(m_sourcePortRetryEvent);
+        for (auto& [key, queuePair] : m_ownedQueuePairs) {
+            if (m_driver && m_driver->m_rdma) m_driver->m_rdma->CancelQueuePair(queuePair);
+            queuePair->m_notifyAppFinish = Callback<void>();
+            queuePair->m_applicationPayload = nullptr;
+        }
+        m_ownedQueuePairs.clear();
         if (m_driver && m_driver->m_rdma) {
             m_driver->m_rdma->UnregisterAppReceiveCallback(m_localPort);
         }
@@ -511,16 +518,20 @@ namespace ns3 {
 
         InetSocketAddress local = InetSocketAddress::ConvertFrom(m_localAddress);
         InetSocketAddress remote = InetSocketAddress::ConvertFrom(peer->second);
-        uint16_t sourcePort = AllocateSourcePort(peerId);
+        uint16_t sourcePort = AllocateSourcePort(peerId, metadata.priorityGroup);
         if (sourcePort == 0) {
             m_waitingForSourcePort[peerId].push_back({packet->Copy(), metadata});
+            if (!m_sourcePortRetryEvent.IsRunning())
+                m_sourcePortRetryEvent = Simulator::Schedule(MicroSeconds(100), &RdmaConsensusTransport::RetryPendingSends, this);
             return;
         }
         m_sourcePortsInUse.insert({peerId, sourcePort});
 
         m_driver->AddQueuePair(packet->Copy(), metadata.priorityGroup, local.GetIpv4(), remote.GetIpv4(), sourcePort, remote.GetPort(),
-                               m_window, m_baseRttNs, MakeCallback(&RdmaConsensusTransport::HandleSendComplete, this).Bind(peerId, sourcePort),
+                               m_window, m_baseRttNs, MakeCallback(&RdmaConsensusTransport::HandleSendComplete, this).Bind(peerId, sourcePort, metadata.priorityGroup),
                                Simulator::GetMaximumSimulationTime());
+        m_ownedQueuePairs[{remote.GetIpv4().Get(), sourcePort, metadata.priorityGroup}] =
+            m_driver->m_rdma->GetQp(remote.GetIpv4().Get(), sourcePort, metadata.priorityGroup);
     }
 
     void RdmaConsensusTransport::DoDispose() {
@@ -571,18 +582,17 @@ namespace ns3 {
         if (!m_iorsWireEnabled) {
             // A nonparticipating receiver gets the original protocol frame at
             // the RDMA edge, after reassembly and before application delivery.
-            ConsensusMessage decoded;
-            if (ConsensusMessage::FromPacket(frame, decoded) && decoded.iorsPresent) {
-                decoded.iorsPresent = false;
-                frame = decoded.ToPacket();
-            }
+            ConsensusMessage::StripIorsExtension(frame);
         }
         Deliver(peerId, frame);
         m_reassembly.erase(key);
         m_driver->m_rdma->DeleteRxQp(sourceIp, priorityGroup, sourcePort);
     }
 
-    void RdmaConsensusTransport::HandleSendComplete(uint32_t peerId, uint16_t sourcePort) {
+    void RdmaConsensusTransport::HandleSendComplete(uint32_t peerId, uint16_t sourcePort, uint16_t priorityGroup) {
+        auto peer = m_peerAddresses.find(peerId);
+        if (peer != m_peerAddresses.end())
+            m_ownedQueuePairs.erase({InetSocketAddress::ConvertFrom(peer->second).GetIpv4().Get(), sourcePort, priorityGroup});
         m_sourcePortsInUse.erase({peerId, sourcePort});
         auto waiting = m_waitingForSourcePort.find(peerId);
         if (m_running && waiting != m_waitingForSourcePort.end() && !waiting->second.empty()) {
@@ -593,13 +603,32 @@ namespace ns3 {
         }
     }
 
-    uint16_t RdmaConsensusTransport::AllocateSourcePort(uint32_t peerId) {
+    void RdmaConsensusTransport::RetryPendingSends() {
+        if (!m_running) return;
+        std::vector<std::pair<uint32_t, PendingSend>> ready;
+        for (auto& [peer, queue] : m_waitingForSourcePort) {
+            if (queue.empty()) continue;
+            ready.push_back({peer, queue.front()});
+            queue.pop_front();
+        }
+        for (const auto& [peer, pending] : ready) SendNow(peer, pending.packet, pending.metadata);
+        for (auto waiting = m_waitingForSourcePort.begin(); waiting != m_waitingForSourcePort.end();) {
+            if (waiting->second.empty()) waiting = m_waitingForSourcePort.erase(waiting);
+            else ++waiting;
+        }
+        if (!m_waitingForSourcePort.empty() && !m_sourcePortRetryEvent.IsRunning())
+            m_sourcePortRetryEvent = Simulator::Schedule(MicroSeconds(100), &RdmaConsensusTransport::RetryPendingSends, this);
+    }
+
+    uint16_t RdmaConsensusTransport::AllocateSourcePort(uint32_t peerId, uint16_t priorityGroup) {
+        const uint32_t remote = InetSocketAddress::ConvertFrom(m_peerAddresses.at(peerId)).GetIpv4().Get();
         for (uint32_t attempt = 0; attempt < 65535; ++attempt) {
             uint16_t candidate = m_nextSourcePort++;
             if (m_nextSourcePort < 10000) {
                 m_nextSourcePort = 10000;
             }
-            if (candidate != 0 && m_sourcePortsInUse.find({peerId, candidate}) == m_sourcePortsInUse.end()) {
+            if (candidate != 0 && m_sourcePortsInUse.find({peerId, candidate}) == m_sourcePortsInUse.end() &&
+                m_driver->m_rdma->IsQpPortAvailable(remote, candidate, priorityGroup)) {
                 return candidate;
             }
         }

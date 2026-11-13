@@ -28,6 +28,23 @@ class StatisticsTest(unittest.TestCase):
     def artifact(self, suffix):
         return str(self.prefix) + '-' + suffix
 
+    def test_compact_background_aggregates_preserve_completion_metrics(self):
+        write_rows(self.artifact('background-events.csv'), ['event', 'time_ns'], [])
+        fields = ['size_class', 'started', 'completed', 'incomplete', 'completion_fraction',
+                  'mean_us', 'max_us', 'p50_us', 'p95_us', 'p99_us']
+        write_rows(self.artifact('background-summary.csv'), fields,
+                   [dict(zip(fields, ['all', 5, 4, 1, .8, 12.5, 20, 10, 20, 20]))])
+        result = background_metrics(self.prefix)[0]
+        self.assertEqual(result['status'], 'aggregate-only')
+        self.assertEqual(result['started'], 5)
+        self.assertEqual(result['completed'], 4)
+        self.assertEqual(result['completion_fraction'], .8)
+        self.assertEqual(result['p95_us'], 20)
+
+    def test_disabled_paths_are_reported_as_not_recorded(self):
+        result = path_metrics(self.prefix, dict(transaction_path_events=False))
+        self.assertEqual(result[0]['status'], 'not-recorded')
+
     def test_trailing_window_boundaries_and_weights(self):
         events = [(0, 100), (1, 1), (250000, 2), (250001, 3)]
         samples = list(throughput_samples(events, 260000))
@@ -229,6 +246,13 @@ class SlurmMatrixTest(unittest.TestCase):
         self.assertTrue(any('point-to-point' in path for path in fingerprints))
         self.assertTrue(any('core-optimized' in path for path in fingerprints))
         self.assertTrue(all(len(value) == 64 for value in fingerprints.values()))
+
+    def test_explicit_campaign_binary_is_fingerprinted(self):
+        binary = self.slurm.NS3 / self.slurm.RUNTIME[0]
+        self.assertEqual(self.slurm.runtime_fingerprints(binary),
+                         self.slurm.runtime_fingerprints())
+        with self.assertRaises(ValueError):
+            self.slurm.runtime_fingerprints(Path('/tmp/outside-campaign-binary'))
 
     def test_changed_trace_is_rejected_before_launch(self):
         from unittest.mock import patch

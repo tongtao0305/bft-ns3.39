@@ -41,4 +41,5 @@ build_lib(
     OpenSSL::Crypto
   TEST_SOURCES
     test/consensus-test-suite.cc
+    test/runtime-regression-test-suite.cc
 )

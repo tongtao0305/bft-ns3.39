@@ -48,17 +48,12 @@ private:
 	struct IorsEntry { uint64_t value; Time expires; };
 	std::map<IorsKey, IorsEntry> m_iorsEntries;
 	std::map<uint64_t, std::pair<IorsKey, Time>> m_iorsFingerprints;
-	std::map<uint32_t, uint32_t> m_iorsSources;
-	std::map<uint32_t, uint32_t> m_iorsIngressPorts;
 	uint32_t m_iorsMode{0};
 	bool m_iorsDetectOnly{false};
 	uint32_t m_iorsCapacity{4096};
 	uint32_t m_iorsFingerprintBits{64};
 	uint32_t m_iorsHoldCapacity{128};
 	uint32_t m_iorsHeld{0};
-	uint32_t m_iorsZyzReplicaCount{4};
-	uint32_t m_iorsBidlSequencerId{200};
-	uint32_t m_iorsBidlOrdererCount{0};
 	uint64_t m_iorsObserved{0};
 	uint64_t m_iorsMarked{0};
 	uint64_t m_iorsWaited{0};
@@ -88,8 +83,6 @@ public:
 	void SetEcmpSeed(uint32_t seed);
 	void AddTableEntry(Ipv4Address &dstAddr, uint32_t intf_idx);
 	void ClearTable();
-	void SetIorsSource(uint32_t ipv4Address, uint32_t senderId);
-	void SetIorsIngressPort(uint32_t port, uint32_t ipv4Address);
 	uint64_t GetIorsObserved() const { return m_iorsObserved; }
 	uint64_t GetIorsMarked() const { return m_iorsMarked; }
 	uint64_t GetIorsWaited() const { return m_iorsWaited; }

@@ -7,10 +7,13 @@
 #include <vector>
 
 namespace ns3 {
+    void RequestConsensusStop(int signal);
+    bool WasConsensusStopRequested();
 
     /** Summary returned by a complete consensus experiment run. */
     struct ConsensusRunResult {
         bool success{false};
+        bool interrupted{false};
         uint64_t expectedRequests{0};
         uint64_t completedRequests{0};
         uint64_t completedTransactions{0};

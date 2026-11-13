@@ -20,6 +20,7 @@ public:
 	Ipv4Address sip, dip;
 	uint16_t sport, dport;
 	uint64_t m_size;
+	bool m_completed{false};
 	uint64_t snd_nxt, snd_una; // next seq to send, the highest unacked seq
 	uint16_t m_pg;
 	uint16_t m_ipid;

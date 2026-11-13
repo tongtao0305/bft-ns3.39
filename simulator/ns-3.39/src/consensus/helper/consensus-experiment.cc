@@ -1,6 +1,8 @@
 #include "consensus-experiment.h"
 
 #include "consensus-helper.h"
+#include "consensus-runner.h"
+#include "ns3/node-list.h"
 
 #include "ns3/abort.h"
 #include "ns3/bidl-application.h"
@@ -43,6 +45,7 @@
 #include <cctype>
 #include <cmath>
 #include <fstream>
+#include <filesystem>
 #include <iomanip>
 #include <numeric>
 #include <queue>
@@ -69,8 +72,6 @@ namespace ns3 {
                 node->SetAttribute("IorsTtl", TimeValue(MicroSeconds(config.iorsTtlUs)));
                 node->SetAttribute("IorsFixedWait", TimeValue(MicroSeconds(config.iorsFixedWaitUs)));
                 node->SetAttribute("IorsMaxWait", TimeValue(MicroSeconds(config.iorsMaxWaitUs)));
-                node->SetAttribute("IorsZyzReplicaCount", UintegerValue(config.replicaCount));
-                node->SetAttribute("IorsBidlOrdererCount", UintegerValue(config.architecture == "bidl" && config.bidlNativeSequencing ? config.replicaCount : 0));
             }
         }
 
@@ -225,7 +226,7 @@ namespace ns3 {
             if (path.empty()) {
                 return result;
             }
-            for (const LegacyFlowRecord& flow : ReadLegacyFlowFile(path)) {
+            for (const LegacyFlowRecord& flow : GetCachedLegacyFlowFile(path)) {
                 if (flow.applicationId == 1) {
                     result.push_back(flow);
                 }
@@ -344,6 +345,17 @@ namespace ns3 {
     }
 
     std::vector<LegacyFlowRecord> ReadLegacyFlowFile(const std::string& path) {
+        return GetCachedLegacyFlowFile(path);
+    }
+
+    const std::vector<LegacyFlowRecord>& GetCachedLegacyFlowFile(const std::string& path) {
+        static std::string cachedPath;
+        static std::filesystem::file_time_type cachedTime;
+        static uintmax_t cachedSize = 0;
+        static std::vector<LegacyFlowRecord> cachedFlows;
+        const auto modified = std::filesystem::last_write_time(path);
+        const auto bytes = std::filesystem::file_size(path);
+        if (path == cachedPath && modified == cachedTime && bytes == cachedSize) return cachedFlows;
         std::ifstream input(path);
         if (!input) {
             throw std::runtime_error("cannot open legacy flow file: " + path);
@@ -368,7 +380,11 @@ namespace ns3 {
             flow.destinationPort = static_cast<uint16_t>(destinationPort);
             flows.push_back(flow);
         }
-        return flows;
+        cachedFlows = std::move(flows);
+        cachedPath = path;
+        cachedTime = modified;
+        cachedSize = bytes;
+        return cachedFlows;
     }
 
     TypeId ConsensusSwitchPolicy::GetTypeId() {
@@ -815,6 +831,8 @@ namespace ns3 {
         command.AddValue("run", "ns-3 independent run number", run);
         command.AddValue("outputPrefix", "Prefix for JSON and CSV result files", outputPrefix);
         command.AddValue("diagnosticEvents", "Retain all candidate traces; default retains marked and conflicting candidates", diagnosticEvents);
+        command.AddValue("transactionPathEvents", "Write individual transaction path events", transactionPathEvents);
+        command.AddValue("backgroundFlowEvents", "Write and retain individual background flow events", backgroundFlowEvents);
     }
 
     void ConsensusExperimentConfig::Validate() const {
@@ -1172,6 +1190,8 @@ namespace ns3 {
                << "  \"zyzzyva_equivocation_plan\": \"" << zyzzyvaEquivocationPlan << "\",\n"
                << "  \"zyzzyva_malicious_replica_ids\": \"" << zyzzyvaMaliciousReplicaIds << "\",\n"
                << "  \"diagnostic_events\": " << (diagnosticEvents ? "true" : "false") << ",\n"
+               << "  \"transaction_path_events\": " << (transactionPathEvents ? "true" : "false") << ",\n"
+               << "  \"background_flow_events\": " << (backgroundFlowEvents ? "true" : "false") << ",\n"
                << "  \"zyzzyva_view_change_enabled\": " << (zyzzyvaViewChangeEnabled ? "true" : "false") << ",\n"
                << "  \"ezbft_variant\": " << ezbftVariant << ",\n"
                << "  \"ezbft_variant_name\": \"" << (ezbftVariant == 0 ? "original" : "research-pbft-finalization") << "\",\n"
@@ -1974,7 +1994,8 @@ namespace ns3 {
         constexpr uint32_t ID_BASE = 50000;
         constexpr uint16_t PORT = 19000;
         std::vector<Ptr<RdmaWorkloadApplication>> workloads;
-        for (uint32_t index = 0; index < nodes.GetN(); ++index) {
+        const bool synthetic = rdmaLongFlows || rdmaShortFlows || rdmaIncastSenders || rdmaConstantRateGbps > 0.0;
+        for (uint32_t index = 0; synthetic && index < nodes.GetN(); ++index) {
             uint32_t localId = ID_BASE + index;
             Ptr<RdmaConsensusTransport> rdma = CreateObject<RdmaConsensusTransport>();
             rdma->SetAttribute("PriorityGroup", UintegerValue(rdmaBackgroundPriorityGroup));
@@ -2059,7 +2080,7 @@ namespace ns3 {
         }
 
         if (!flowFile.empty()) {
-            std::vector<LegacyFlowRecord> records = ReadLegacyFlowFile(flowFile);
+            const auto& records = GetCachedLegacyFlowFile(flowFile);
             std::map<std::pair<uint32_t, uint16_t>, Ptr<RdmaWorkloadApplication>> receivers;
             std::map<uint32_t, Ptr<RdmaConsensusTransport>> senderTransports;
             std::map<uint32_t, Ptr<RdmaWorkloadApplication>> senders;
@@ -2156,6 +2177,13 @@ namespace ns3 {
 
     void ConsensusStatistics::SetEventOutputPrefix(const std::string& prefix) {
         if (prefix.empty()) return;
+        m_runtimeStarted = std::chrono::steady_clock::now();
+        m_runtimeStream.open(prefix + "-runtime.csv");
+        m_replicaCommitStream.open(prefix + "-replica-progress.csv");
+        if (!m_runtimeStream || !m_replicaCommitStream) throw std::runtime_error("cannot open runtime checkpoint output");
+        m_runtimeStream << "time_ns,wall_elapsed_s,events,active_qps,active_dcqcn_timers,completed_ack_cnp,completed_requests,background_completed,unmatched_feedback\n";
+        m_replicaCommitStream << "time_ns,node_id,committed_transactions,committed_blocks\n";
+        m_runtimeEvent = Simulator::Schedule(MilliSeconds(100), &ConsensusStatistics::SampleRuntime, this);
         m_bidlAttackEventStream.open(prefix + "-bidl-attack-events.csv", std::ios::out | std::ios::trunc);
         m_bidlReexecutionEventStream.open(prefix + "-bidl-reexecution-events.csv", std::ios::out | std::ios::trunc);
         m_candidateEventStream.open(prefix + "-candidate-events.csv", std::ios::out | std::ios::trunc);
@@ -2205,7 +2233,7 @@ namespace ns3 {
     }
 
     void ConsensusStatistics::AttachReplicas(const ApplicationContainer& applications) {
-        Simulator::Schedule(MilliSeconds(10), &ConsensusStatistics::SampleReplicaBacklog, this);
+        m_replicaBacklogEvent = Simulator::Schedule(MilliSeconds(10), &ConsensusStatistics::SampleReplicaBacklog, this);
         for (uint32_t index = 0; index < applications.GetN(); ++index) {
             Ptr<ConsensusApplication> application = DynamicCast<ConsensusApplication>(applications.Get(index));
             if (!application) {
@@ -2448,6 +2476,7 @@ namespace ns3 {
     }
 
     void ConsensusStatistics::WriteResults(const std::string& outputPrefix, const ConsensusExperimentConfig& config) const {
+        FlushRuntimeCheckpoint();
         if (m_bidlLiveProgressStream.is_open()) m_bidlLiveProgressStream.flush();
         if (m_bidlAttackEventStream.is_open()) {
             m_bidlAttackEventStream.flush();
@@ -2480,17 +2509,14 @@ namespace ns3 {
             throw std::runtime_error("cannot write consensus result files");
         }
 
-        std::vector<double> backgroundFct;
-        for (const auto& flow : m_backgroundFlows) {
-            backgroundFct.push_back(flow.fct.GetMicroSeconds());
-        }
-        std::sort(backgroundFct.begin(), backgroundFct.end());
-        auto backgroundPercentile = [&backgroundFct](double percentile) {
-            if (backgroundFct.empty()) {
-                return 0.0;
+        auto backgroundPercentile = [this](double percentile) {
+            const uint64_t target = static_cast<uint64_t>(std::ceil(percentile * m_backgroundCompletedCount / 100.0));
+            uint64_t cumulative = 0;
+            for (const auto& [latency, count] : m_backgroundFctHistogram) {
+                cumulative += count;
+                if (cumulative >= target) return static_cast<double>(latency);
             }
-            size_t index = static_cast<size_t>(std::ceil((percentile / 100.0) * backgroundFct.size()) - 1.0);
-            return backgroundFct[std::min(index, backgroundFct.size() - 1)];
+            return 0.0;
         };
         std::vector<double> reexecutionLatency;
         for (Time value : m_bidlReexecutionLatencies) {
@@ -2606,7 +2632,7 @@ namespace ns3 {
         summary << "zyzzyva_parsed_candidate_records," << m_parsedZyzzyvaCandidates << ",candidates\n"
                 << "zyzzyva_conflicting_candidate_slots," << m_conflictingCandidateSlots.size() << ",slots\n"
                 << "zyzzyva_divergent_candidate_instances," << m_divergentCandidateInstances.size() << ",instances\n";
-        summary << "background_completed_flows," << m_backgroundFlows.size() << ",flows\n"
+        summary << "background_completed_flows," << m_backgroundCompletedCount << ",flows\n"
                 << "background_fct_p50," << backgroundPercentile(50) << ",microseconds\n"
                 << "background_fct_p95," << backgroundPercentile(95) << ",microseconds\n";
 
@@ -2721,6 +2747,37 @@ namespace ns3 {
             background << flow.receiverId << ',' << flow.senderId << ',' << flow.flowId << ',' << flow.bytes << ','
                        << flow.fct.GetMicroSeconds() << '\n';
         }
+        std::ofstream aggregates(outputPrefix + "-background-summary.csv");
+        if (!aggregates) throw std::runtime_error("cannot write background aggregates");
+        aggregates << "size_class,started,completed,incomplete,completion_fraction,mean_us,max_us,p50_us,p95_us,p99_us\n";
+        BackgroundAggregate all;
+        for (const auto& group : m_backgroundAggregates) {
+            all.started += group.started;
+            all.completed += group.completed;
+            all.totalLatencyNs += group.totalLatencyNs;
+            all.maxLatencyNs = std::max(all.maxLatencyNs, group.maxLatencyNs);
+        }
+        const std::array<std::string, 4> labels{"all", "small_le_100KiB", "medium_100KiB_to_10MiB", "large_gt_10MiB"};
+        for (size_t index = 0; index < labels.size(); ++index) {
+            const auto& group = index == 0 ? all : m_backgroundAggregates[index - 1];
+            const auto& histogram = index == 0 ? m_backgroundFctHistogram : group.histogram;
+            aggregates << labels[index] << ',' << group.started << ',' << group.completed << ','
+                << (group.started >= group.completed ? group.started - group.completed : 0) << ','
+                << (group.started ? static_cast<double>(group.completed) / group.started : 0.0) << ','
+                << (group.completed ? static_cast<double>(group.totalLatencyNs) / group.completed / 1000 : 0.0) << ','
+                << static_cast<double>(group.maxLatencyNs) / 1000;
+            for (double percentile : {50.0, 95.0, 99.0}) {
+                const uint64_t target = static_cast<uint64_t>(std::ceil(percentile * group.completed / 100));
+                uint64_t count = 0;
+                int64_t value = 0;
+                for (const auto& [latency, samples] : histogram) {
+                    count += samples;
+                    if (count >= target) { value = latency; break; }
+                }
+                aggregates << ',' << value;
+            }
+            aggregates << '\n';
+        }
     }
 
     void ConsensusStatistics::OnRequestSubmitted(ConsensusClientApplication* client, uint32_t clientId, uint64_t requestId, Time time) {
@@ -2798,7 +2855,7 @@ namespace ns3 {
             BidlMarkedKey key{receiverId, view, instanceId, digest, clientId, requestId};
             if (phase == BIDL_CANDIDATE_SPECULATIVE_EXECUTION) {
                 ++m_bidlSpeculativeExecutions;
-                m_bidlExecutedCandidates.insert(key);
+                if (m_trackIorsCandidates || m_diagnosticEvents) m_bidlExecutedCandidates.insert(key);
                 auto found = m_bidlMarkedAt.find(key);
                 if (found != m_bidlMarkedAt.end()) {
                     m_bidlMarkedExecuted.insert(found->first);
@@ -3041,7 +3098,7 @@ namespace ns3 {
         const uint16_t type = static_cast<uint16_t>(message.type);
         const bool needed = type == 30 || type == 65 || type == 32 || type == 36 || type == 37 ||
             type == 60 || type == 62 || type == 63 || type == 64 || type == 66 || (type >= 42 && type <= 47);
-        if ((m_diagnosticEvents || needed) && m_bidlPathStream.is_open())
+        if ((m_diagnosticEvents || (m_transactionPathEvents && needed)) && m_bidlPathStream.is_open())
             m_bidlPathStream << (tx ? "tx" : "rx") << ',' << message.senderId << ',' << message.receiverId << ','
                 << type << ',' << message.instanceId << ',' << message.ToPacket()->GetSize() << ','
                 << Simulator::Now().GetMicroSeconds() << ',' << message.messageId << ',' << message.view << ','
@@ -3056,7 +3113,8 @@ namespace ns3 {
     }
 
     void ConsensusStatistics::OnBackgroundFlowStarted(uint32_t sender, uint32_t receiver, uint64_t flow, uint32_t bytes) {
-        if (m_backgroundEventStream.is_open()) m_backgroundEventStream << "start," << Simulator::Now().GetNanoSeconds()
+        ++m_backgroundAggregates[bytes <= 102400 ? 0 : bytes <= 10485760 ? 1 : 2].started;
+        if ((m_backgroundFlowEvents || m_diagnosticEvents) && m_backgroundEventStream.is_open()) m_backgroundEventStream << "start," << Simulator::Now().GetNanoSeconds()
             << ',' << sender << ',' << receiver << ',' << flow << ',' << bytes << ",\n";
     }
 
@@ -3068,16 +3126,80 @@ namespace ns3 {
                 << application->GetVerificationBacklog() << ',' << engine->GetExecutionBacklog() << ','
                 << engine->GetBufferedOrderCount() << ',' << engine->IsRecovering() << '\n';
         }
-        Simulator::Schedule(MilliSeconds(10), &ConsensusStatistics::SampleReplicaBacklog, this);
+        m_replicaBacklogEvent = Simulator::Schedule(MilliSeconds(10), &ConsensusStatistics::SampleReplicaBacklog, this);
+    }
+
+    void ConsensusStatistics::FlushRuntimeCheckpoint() const {
+        uint64_t active = 0;
+        uint64_t timers = 0;
+        uint64_t completedCnp = 0;
+        uint64_t unmatched = 0;
+        for (auto node = NodeList::Begin(); node != NodeList::End(); ++node) {
+            auto driver = (*node)->GetObject<RdmaDriver>();
+            if (!driver || !driver->m_rdma) continue;
+            active += driver->m_rdma->m_qpMap.size();
+            completedCnp += driver->m_rdma->m_completedAckCnpCount;
+            unmatched += driver->m_rdma->m_unmatchedFeedbackCount;
+            for (const auto& [key, queuePair] : driver->m_rdma->m_qpMap) {
+                timers += !queuePair->mlx.m_eventUpdateAlpha.IsExpired();
+                timers += !queuePair->mlx.m_eventDecreaseRate.IsExpired();
+                timers += !queuePair->mlx.m_rpTimer.IsExpired();
+            }
+        }
+        if (m_runtimeStream.is_open()) {
+            const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - m_runtimeStarted).count();
+            m_runtimeStream << Simulator::Now().GetNanoSeconds() << ',' << elapsed << ',' << Simulator::GetEventCount()
+                << ',' << active << ',' << timers << ',' << completedCnp << ',' << m_completedRequests << ','
+                << m_backgroundCompletedCount << ',' << unmatched << '\n';
+            m_runtimeStream.flush();
+        }
+        if (m_replicaCommitStream.is_open()) {
+            for (const auto& application : m_bidlApplications) {
+                if (!application->IsExecutor()) continue;
+                m_replicaCommitStream << Simulator::Now().GetNanoSeconds() << ',' << application->GetNodeId() << ','
+                    << application->GetCommittedTransactions() << ',' << application->GetCommittedBlocks() << '\n';
+            }
+            m_replicaCommitStream.flush();
+        }
+        for (auto stream : {&m_candidateEventStream, &m_bidlPathStream, &m_bidlLiveProgressStream,
+                            &m_bidlAttackEventStream, &m_bidlReexecutionEventStream, &m_finalizedStream,
+                            &m_backgroundEventStream, &m_replicaBacklogStream}) {
+            if (stream->is_open()) stream->flush();
+        }
+    }
+
+    void ConsensusStatistics::SampleRuntime() {
+        FlushRuntimeCheckpoint();
+        if (WasConsensusStopRequested()) {
+            Simulator::Stop();
+            return;
+        }
+        m_runtimeEvent = Simulator::Schedule(MilliSeconds(100), &ConsensusStatistics::SampleRuntime, this);
+    }
+
+    void ConsensusStatistics::DoDispose() {
+        Simulator::Cancel(m_runtimeEvent);
+        Simulator::Cancel(m_replicaBacklogEvent);
+        m_bidlApplications.clear();
+        m_replicaApplications.clear();
+        Object::DoDispose();
     }
 
     void ConsensusStatistics::OnBackgroundFlowCompleted(uint32_t receiverId, uint32_t senderId, uint64_t flowId, uint32_t bytes, Time fct) {
-        m_backgroundFlows.push_back({receiverId, senderId, flowId, bytes, fct});
-        if (m_backgroundEventStream.is_open()) m_backgroundEventStream << "complete," << Simulator::Now().GetNanoSeconds()
+        ++m_backgroundCompletedCount;
+        ++m_backgroundFctHistogram[fct.GetMicroSeconds()];
+        auto& aggregate = m_backgroundAggregates[bytes <= 102400 ? 0 : bytes <= 10485760 ? 1 : 2];
+        ++aggregate.completed;
+        aggregate.totalLatencyNs += fct.GetNanoSeconds();
+        aggregate.maxLatencyNs = std::max(aggregate.maxLatencyNs, static_cast<uint64_t>(fct.GetNanoSeconds()));
+        ++aggregate.histogram[fct.GetMicroSeconds()];
+        if (m_backgroundFlowEvents || m_diagnosticEvents) m_backgroundFlows.push_back({receiverId, senderId, flowId, bytes, fct});
+        if ((m_backgroundFlowEvents || m_diagnosticEvents) && m_backgroundEventStream.is_open()) m_backgroundEventStream << "complete," << Simulator::Now().GetNanoSeconds()
             << ',' << senderId << ',' << receiverId << ',' << flowId << ',' << bytes << ',' << fct.GetNanoSeconds() << '\n';
     }
 
     void ConsensusStatistics::OnDeviceTx(uint32_t device, Ptr<const Packet> packet) {
+        if (WasConsensusStopRequested()) Simulator::Stop();
         ++m_devices.at(device).fullTxPackets;
         m_devices.at(device).fullTxBytes += packet->GetSize();
         if (!IsMeasuring())

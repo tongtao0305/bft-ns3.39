@@ -42,9 +42,10 @@ def digest(path):
 
 
 
-def runtime_fingerprints():
-    paths = set(RUNTIME)
-    binary = NS3 / RUNTIME[0]
+def runtime_fingerprints(binary=None):
+    binary = (binary or NS3 / RUNTIME[0]).resolve()
+    paths = set(RUNTIME[2:])
+    paths.add(str(binary.relative_to(NS3)))
     result = subprocess.run(['ldd', str(binary)], capture_output=True, text=True, check=True)
     if 'not found' in result.stdout:
         raise ValueError('simulator has missing shared libraries: ' + result.stdout.strip())
@@ -151,7 +152,8 @@ def prepare(args):
     for _, parameters, _, _ in tasks:
         if not 0 <= int(parameters.get('run', 1)) <= 2**64-1:
             raise ValueError('run must be in 0..18446744073709551615')
-    runtime = runtime_fingerprints()
+    binary = (args.binary or NS3 / RUNTIME[0]).resolve()
+    runtime = runtime_fingerprints(binary)
     # Hash each unique input once, even when many cases replay the same large trace.
     inputs = {}
     for _, parameters, _, _ in tasks:
@@ -169,7 +171,8 @@ def prepare(args):
     for name in ('configs', 'logs', 'results'):
         (output / name).mkdir()
     (output / 'spec.json').write_text(json.dumps(spec, indent=2) + '\n')
-    manifest = {'schema_version': 1, 'runtime_sha256': runtime, 'input_files': inputs,
+    manifest = {'schema_version': 1, 'binary': str(binary.relative_to(NS3)),
+                'runtime_sha256': runtime, 'input_files': inputs,
                 'resources': resources, 'source_spec': str(spec_path.resolve()), 'tasks': []}
     for index, (name, parameters, selected, seed) in enumerate(tasks):
         config = output / 'configs' / f'task-{index:05d}.conf'
@@ -315,6 +318,8 @@ def run_task(args):
     attempt.mkdir(parents=True, exist_ok=False)
     command = [sys.executable, str(NS3 / 'examples/consensus/run-experiment.py'),
                '--config', str(config), '--seed', str(task['seed']), '--run', str(task.get('run', 1)), '--output', str(attempt)]
+    if manifest.get('binary'):
+        command.extend(['--binary', str(NS3 / manifest['binary'])])
     print(f'host={socket.gethostname()} task={args.task_id} case={task["name"]} output={attempt}', flush=True)
     child = subprocess.Popen(command, cwd=NS3)
 
@@ -375,6 +380,7 @@ def main():
     p = commands.add_parser('prepare', help='Expand a matrix into task configurations; no jobs are started')
     p.add_argument('--spec', type=Path, help='JSON matrix; defaults to bidl-hadoop-matrix.json (90 tasks)')
     p.add_argument('--output', type=Path, required=True, help='New campaign directory under the ns-3 root')
+    p.add_argument('--binary', type=Path, help='Simulator under the ns-3 root; recorded and verified for every task')
     p.add_argument('--cases', nargs='+', help='Select named comparison groups from the matrix')
     p.add_argument('--hadoop-loads', nargs='+', type=int, help='Select Hadoop Gbit/s per host, e.g. 5 25 50; 0 disables background')
     p.set_defaults(action=prepare)

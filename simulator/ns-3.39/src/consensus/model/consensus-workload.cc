@@ -88,6 +88,9 @@ namespace ns3 {
                 delay = Seconds(0);
             }
             m_nextEvent = Simulator::Schedule(delay, &RdmaWorkloadApplication::DispatchNextFlow, this);
+        } else {
+            std::vector<RdmaWorkloadFlow>().swap(m_flows);
+            m_nextFlowIndex = 0;
         }
     }
 
@@ -115,7 +118,7 @@ namespace ns3 {
 
     void RdmaWorkloadApplication::ReceiveFlow(uint32_t peerId, Ptr<Packet> packet) {
         ConsensusMessage message;
-        if (!m_running || !ConsensusMessage::FromPacket(packet, message) || message.type != ConsensusMessageType::RDMA_BACKGROUND_FLOW ||
+        if (!m_running || !ConsensusMessage::FromPacket(packet, message, false) || message.type != ConsensusMessageType::RDMA_BACKGROUND_FLOW ||
             message.senderId != peerId || message.receiverId != m_nodeId) {
             return;
         }
@@ -229,7 +232,7 @@ namespace ns3 {
             byPhysicalId[client.physicalId] = client.application;
         }
         uint64_t scheduled = 0;
-        for (const LegacyFlowRecord& flow : ReadLegacyFlowFile(config.flowFile)) {
+        for (const LegacyFlowRecord& flow : GetCachedLegacyFlowFile(config.flowFile)) {
             if (flow.applicationId != 1) {
                 continue;
             }

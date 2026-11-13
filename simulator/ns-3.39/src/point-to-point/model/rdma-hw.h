@@ -8,6 +8,7 @@
 #include <ns3/callback.h>
 #include "qbb-net-device.h"
 #include <unordered_map>
+#include <unordered_set>
 #include "pint.h"
 
 namespace ns3 {
@@ -40,6 +41,7 @@ public:
 	bool m_rateBound;
 	std::vector<RdmaInterfaceMgr> m_nic; // list of running nic controlled by this RdmaHw
 	std::unordered_map<uint64_t, Ptr<RdmaQueuePair> > m_qpMap; // mapping from uint64_t to qp
+	std::unordered_set<uint64_t> m_cancelledQpKeys;
 	std::unordered_map<uint64_t, Ptr<RdmaRxQueuePair> > m_rxQpMap; // mapping from uint64_t to rx qp
 	std::unordered_map<uint32_t, std::vector<int> > m_rtTable; // map from ip address (u32) to possible ECMP port (index of dev)
 
@@ -76,6 +78,11 @@ public:
 
 	void RecoverQueue(Ptr<RdmaQueuePair> qp);
 	void QpComplete(Ptr<RdmaQueuePair> qp);
+	void CancelQueuePair(Ptr<RdmaQueuePair> qp, bool retirePort = true);
+	bool IsQpPortAvailable(uint32_t remote, uint16_t port, uint16_t priorityGroup) const;
+	void DoDispose() override;
+	uint64_t m_completedAckCnpCount{0};
+	uint64_t m_unmatchedFeedbackCount{0};
 	void SetLinkDown(Ptr<QbbNetDevice> dev);
 
 	// call this function after the NIC is setup

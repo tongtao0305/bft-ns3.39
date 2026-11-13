@@ -2,6 +2,7 @@
 """Run exactly one consensus experiment and save its artifacts."""
 import argparse
 import json
+import hashlib
 import os
 import resource
 import re
@@ -66,6 +67,38 @@ def classify_exit(exit_code, manifest):
     return 1
 
 
+def runtime_provenance(binary, root, inputs):
+    files = {binary.resolve()}
+    files.update(path.resolve() for path in inputs if path.is_file())
+    dependencies = subprocess.run(["ldd", str(binary)], cwd=root, capture_output=True,
+                                  text=True, timeout=30, check=False)
+    for match in re.finditer(r"(?:=>\s+)?(/[^\s]+)\s+\(", dependencies.stdout):
+        path = Path(match.group(1)).resolve()
+        if path.is_file():
+            files.add(path)
+    artifacts = []
+    for path in sorted(files):
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(block)
+        artifacts.append({"path": str(path), "sha256": digest.hexdigest()})
+    return {"artifacts": artifacts, "dependency_output": dependencies.stdout,
+            "dependency_exit_code": dependencies.returncode}
+
+
+def default_binary(root):
+    cache = root / "cmake-cache/CMakeCache.txt"
+    output = root / "build"
+    if cache.is_file():
+        match = re.search(r"^NS3_OUTPUT_DIRECTORY:(?:STRING|PATH)=(.+)$",
+                          cache.read_text(encoding="utf-8"), re.MULTILINE)
+        if match:
+            configured = Path(match.group(1).strip())
+            output = configured if configured.is_absolute() else root / configured
+    return output / "examples/consensus/ns3.39-bidl-experiment-optimized"
+
+
 def main():
     parser = argparse.ArgumentParser(
         description=__doc__, allow_abbrev=False,
@@ -102,7 +135,7 @@ def main():
     except (OSError, ValueError) as exc:
         parser.error(str(exc))
     output = args.output.resolve()
-    binary = (args.binary or Path(__file__).resolve().parents[2] / "build/examples/consensus/ns3.39-bidl-experiment-optimized").resolve()
+    binary = (args.binary or default_binary(Path(__file__).resolve().parents[2])).resolve()
     if not binary.is_file() or not os.access(binary, os.X_OK):
         parser.error(f"simulator binary is missing or not executable: {binary}")
     ns3_root = Path(__file__).resolve().parents[2]
@@ -150,6 +183,16 @@ def main():
     }, indent=2) + "\n", encoding="utf-8")
     command = [str(binary), f"--configFile={effective_config}"]
     (output / "command.json").write_text(json.dumps(command, indent=2) + "\n", encoding="utf-8")
+    inputs = [effective_config]
+    for key in ("flowFile", "topologyFile"):
+        if values.get(key):
+            path = Path(values[key])
+            inputs.append(path if path.is_absolute() else ns3_root / path)
+    (output / "runtime-provenance.json").write_text(
+        json.dumps(runtime_provenance(binary, ns3_root, inputs), indent=2) + "\n", encoding="utf-8")
+    source_diff = subprocess.run(["git", "diff", "--binary"], cwd=ns3_root,
+                                 capture_output=True, check=False)
+    (output / "source-diff.patch").write_bytes(source_diff.stdout)
     start = time.monotonic()
     launch_error = None
     try:
